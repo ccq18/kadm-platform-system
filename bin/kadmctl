@@ -40,6 +40,7 @@ Usage:
   kadmctl publish-release-console [--repo-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
   kadmctl publish-onecd [--onecd-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
   kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--app-configs-dir <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--dry-run|--apply]
+  kadmctl configure-demo-apps [cluster] [--app-configs-dir <path>] [--db-ssh-target <ssh-target>] [--db-node-ip <ip>] [--dry-run|--apply]
   kadmctl connect [cluster] [--api-port <port>] [--console-port <port>] [--dry-run]
   kadmctl status [cluster] [--api-port <port>]
   kadmctl reset-node <ssh-target> [--dry-run|--apply]
@@ -54,6 +55,7 @@ Examples:
   kadmctl import-assets kadm-platform-assets.tgz
   KADM_GITHUB_TOKEN=... kadmctl publish-release-console --tag sha-1234567 --apply
   KADM_GITHUB_TOKEN=... kadmctl configure-delivery home-prod --apply
+  kadmctl configure-demo-apps home-prod --app-configs-dir /path/to/kadm-app-configs --apply
   kadmctl connect home-prod
   kadmctl status home-prod
   kadmctl reset-node root@1.2.3.4 --apply
@@ -1446,6 +1448,81 @@ data:
 YAML
 }
 
+extract_yaml_string_field() {
+  local file="$1"
+  local key="$2"
+  awk -F': ' -v key="${key}" '$1 == key { print $2; exit }' "${file}"
+}
+
+extract_rollout_env_value() {
+  local file="$1"
+  local key="$2"
+  awk -v key="${key}" '
+    $1 == "-" && $2 == "name:" && $3 == key { found = 1; next }
+    found && $1 == "value:" {
+      gsub(/"/, "", $2)
+      print $2
+      exit
+    }
+  ' "${file}"
+}
+
+wait_for_labeled_pods_ready() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local selector="$3"
+  local timeout_seconds="$4"
+  local deadline=$((SECONDS + timeout_seconds))
+  local state
+
+  while (( SECONDS < deadline )); do
+    state="$(kubectl_for "${kubeconfig_path}" -n "${namespace}" get pods -l "${selector}" -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready} {.status.phase}{"\n"}{end}' 2>/dev/null || true)"
+    if [[ -n "${state}" ]] && printf '%s\n' "${state}" | awk 'NF > 0 && ($1 != "true" || $2 != "Running") { exit 1 } END { exit 0 }'; then
+      info "pods ready for selector ${selector}"
+      return 0
+    fi
+    info "waiting for pods with selector ${selector}"
+    sleep 5
+  done
+
+  die "timed out waiting for pods with selector ${selector}"
+}
+
+configure_mysql_demo_app() {
+  local ssh_target="$1"
+  local secret_file="$2"
+  local user password db_name
+  user="$(extract_yaml_string_field "${secret_file}" "  DB_USER")"
+  password="$(extract_yaml_string_field "${secret_file}" "  DB_PASSWORD")"
+  db_name="$(extract_yaml_string_field "${secret_file}" "  DB_NAME")"
+  [[ -n "${user}" && -n "${password}" && -n "${db_name}" ]] || die "failed to parse database secret file: ${secret_file}"
+
+  ssh "${ssh_target}" sudo sh -s <<REMOTE
+set -eu
+mysql -uroot <<'SQL'
+CREATE DATABASE IF NOT EXISTS ${db_name}
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${user}'@'localhost' IDENTIFIED BY '${password}';
+CREATE USER IF NOT EXISTS '${user}'@'127.0.0.1' IDENTIFIED BY '${password}';
+CREATE USER IF NOT EXISTS '${user}'@'10.42.%' IDENTIFIED BY '${password}';
+CREATE USER IF NOT EXISTS '${user}'@'10.0.%' IDENTIFIED BY '${password}';
+CREATE USER IF NOT EXISTS '${user}'@'10.120.0.%' IDENTIFIED BY '${password}';
+ALTER USER '${user}'@'localhost' IDENTIFIED BY '${password}';
+ALTER USER '${user}'@'127.0.0.1' IDENTIFIED BY '${password}';
+ALTER USER '${user}'@'10.42.%' IDENTIFIED BY '${password}';
+ALTER USER '${user}'@'10.0.%' IDENTIFIED BY '${password}';
+ALTER USER '${user}'@'10.120.0.%' IDENTIFIED BY '${password}';
+GRANT ALL PRIVILEGES ON ${db_name}.* TO '${user}'@'localhost';
+GRANT ALL PRIVILEGES ON ${db_name}.* TO '${user}'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON ${db_name}.* TO '${user}'@'10.42.%';
+GRANT ALL PRIVILEGES ON ${db_name}.* TO '${user}'@'10.0.%';
+GRANT ALL PRIVILEGES ON ${db_name}.* TO '${user}'@'10.120.0.%';
+FLUSH PRIVILEGES;
+SQL
+REMOTE
+}
+
 cmd_bootstrap() {
   local ssh_target=""
   local cluster="${DEFAULT_CLUSTER}"
@@ -1998,6 +2075,128 @@ cmd_cleanup_legacy_onecd() {
   info "legacy onecd resources deleted"
 }
 
+cmd_configure_demo_apps() {
+  local cluster="${DEFAULT_CLUSTER}"
+  local app_configs_dir="${DEFAULT_APP_CONFIGS_DIR}"
+  local db_ssh_target=""
+  local db_node_ip=""
+  local apply=0
+  local cluster_seen=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --app-configs-dir)
+        app_configs_dir="${2:-}"
+        shift 2
+        ;;
+      --db-ssh-target)
+        db_ssh_target="${2:-}"
+        shift 2
+        ;;
+      --db-node-ip)
+        db_node_ip="${2:-}"
+        shift 2
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown configure-demo-apps option: $1"
+        ;;
+      *)
+        if [[ "${cluster_seen}" -eq 1 ]]; then
+          die "unexpected configure-demo-apps argument: $1"
+        fi
+        cluster="$1"
+        cluster_seen=1
+        shift
+        ;;
+    esac
+  done
+
+  validate_cluster_name "${cluster}"
+  [[ -d "${app_configs_dir}" ]] || die "KADM app configs directory not found: ${app_configs_dir}"
+  local hello_secret_file="${app_configs_dir}/apps/demo-hello/base/secret.example.yaml"
+  local hello_rollout_file="${app_configs_dir}/apps/demo-hello/base/rollout.yaml"
+  local spring_secret_file="${app_configs_dir}/apps/demo-hello-spring/base/secret.example.yaml"
+  local spring_rollout_file="${app_configs_dir}/apps/demo-hello-spring/base/rollout.yaml"
+  [[ -f "${hello_secret_file}" ]] || die "demo hello secret file not found: ${hello_secret_file}"
+  [[ -f "${hello_rollout_file}" ]] || die "demo hello rollout file not found: ${hello_rollout_file}"
+  [[ -f "${spring_secret_file}" ]] || die "demo hello spring secret file not found: ${spring_secret_file}"
+  [[ -f "${spring_rollout_file}" ]] || die "demo hello spring rollout file not found: ${spring_rollout_file}"
+
+  if [[ -z "${db_node_ip}" ]]; then
+    db_node_ip="$(extract_rollout_env_value "${hello_rollout_file}" "DB_HOST")"
+  fi
+  [[ -n "${db_node_ip}" ]] || die "db node ip could not be determined"
+  validate_optional_machine_value "db node ip" "${db_node_ip}"
+  if [[ -n "${db_ssh_target}" ]]; then
+    validate_ssh_target "${db_ssh_target}"
+  fi
+
+  load_profile "${cluster}"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: no demo app dependencies will be configured"
+    info "cluster: ${CLUSTER_NAME}"
+    info "app configs: ${app_configs_dir}"
+    info "db node ip: ${db_node_ip}"
+    info "db ssh target: ${db_ssh_target:-auto-detect}"
+    info "creates: apps/hello-db"
+    info "creates: apps/hellospring-db"
+    return 0
+  fi
+
+  require_command ssh
+  require_command kubectl
+  [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
+
+  local tunnel_pid
+  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
+
+  create_namespace_if_missing "${KUBECONFIG_PATH}" apps
+  apply_delivery_yaml "${KUBECONFIG_PATH}" < "${hello_secret_file}"
+  apply_delivery_yaml "${KUBECONFIG_PATH}" < "${spring_secret_file}"
+
+  if [[ -z "${db_ssh_target}" ]]; then
+    local db_external_ip
+    db_external_ip="$(kubectl_for "${KUBECONFIG_PATH}" get nodes -o jsonpath='{range .items[*]}{range .status.addresses[*]}{.type}={.address}{","}{end}{"\n"}{end}' | awk -F, -v ip="${db_node_ip}" '
+      {
+        internal=""
+        external=""
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^InternalIP=/) internal=substr($i, 12)
+          if ($i ~ /^ExternalIP=/) external=substr($i, 12)
+        }
+        if (internal == ip && external != "") { print external; exit }
+      }'
+    )"
+    [[ -n "${db_external_ip}" ]] || die "failed to resolve database node external ip for ${db_node_ip}"
+    db_ssh_target="root@${db_external_ip}"
+  fi
+
+  configure_mysql_demo_app "${db_ssh_target}" "${hello_secret_file}"
+  configure_mysql_demo_app "${db_ssh_target}" "${spring_secret_file}"
+
+  kubectl_retry "${KUBECONFIG_PATH}" -n apps delete pod -l app.kubernetes.io/name=hello --ignore-not-found
+  kubectl_retry "${KUBECONFIG_PATH}" -n apps delete pod -l app.kubernetes.io/name=hellospring --ignore-not-found
+  wait_for_labeled_pods_ready "${KUBECONFIG_PATH}" apps "app.kubernetes.io/name=hello" 300
+  wait_for_labeled_pods_ready "${KUBECONFIG_PATH}" apps "app.kubernetes.io/name=hellospring" 300
+
+  stop_pid "${tunnel_pid}"
+  info "demo app dependencies configured"
+}
+
 main() {
   local command="${1:-help}"
   if [[ $# -gt 0 ]]; then
@@ -2040,6 +2239,9 @@ main() {
       ;;
     cleanup-legacy-onecd)
       cmd_cleanup_legacy_onecd "$@"
+      ;;
+    configure-demo-apps)
+      cmd_configure_demo_apps "$@"
       ;;
     help|-h|--help)
       usage

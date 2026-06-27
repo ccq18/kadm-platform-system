@@ -1242,6 +1242,200 @@ PROFILE
   assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "KUBECONFIG_PATH=${tmp_home}/.kube/kadm/home-prod.yaml"
 }
 
+test_configure_demo_apps_dry_run_describes_secret_and_db_setup() {
+  local tmp_home tmp_apps
+  tmp_home="$(mktemp -d)"
+  tmp_apps="$(mktemp -d)"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  mkdir -p "${tmp_apps}/apps/demo-hello/base" "${tmp_apps}/apps/demo-hello-spring/base"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_apps}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hello_app
+  DB_PASSWORD: hello_password_change_me
+  DB_NAME: hello_app
+YAML
+  cat > "${tmp_apps}/apps/demo-hello/base/rollout.yaml" <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  template:
+    spec:
+      containers:
+        - name: hello
+          env:
+            - name: DB_HOST
+              value: "10.120.0.6"
+YAML
+  cat > "${tmp_apps}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hellospring-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hellospring_app
+  DB_PASSWORD: hellospring_password_change_me
+  DB_NAME: hellospring_app
+YAML
+  cat > "${tmp_apps}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  template:
+    spec:
+      containers:
+        - name: hellospring
+          env:
+            - name: DB_HOST
+              value: "10.120.0.6"
+YAML
+
+  local output
+  output="$(HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${tmp_apps}" --db-ssh-target root@203.0.113.22 --dry-run)"
+
+  assert_contains "${output}" "DRY RUN: no demo app dependencies will be configured"
+  assert_contains "${output}" "cluster: home-prod"
+  assert_contains "${output}" "app configs: ${tmp_apps}"
+  assert_contains "${output}" "db ssh target: root@203.0.113.22"
+  assert_contains "${output}" "creates: apps/hello-db"
+  assert_contains "${output}" "creates: apps/hellospring-db"
+}
+
+test_configure_demo_apps_apply_syncs_secrets_and_mysql_users() {
+  local tmp_home tmp_apps tmp_bin calls_file stdin_file
+  tmp_home="$(mktemp -d)"
+  tmp_apps="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  mkdir -p "${tmp_apps}/apps/demo-hello/base" "${tmp_apps}/apps/demo-hello-spring/base"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_apps}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hello_app
+  DB_PASSWORD: hello_password_change_me
+  DB_NAME: hello_app
+YAML
+  cat > "${tmp_apps}/apps/demo-hello/base/rollout.yaml" <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  template:
+    spec:
+      containers:
+        - name: hello
+          env:
+            - name: DB_HOST
+              value: "10.120.0.6"
+YAML
+  cat > "${tmp_apps}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hellospring-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hellospring_app
+  DB_PASSWORD: hellospring_password_change_me
+  DB_NAME: hellospring_app
+YAML
+  cat > "${tmp_apps}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  template:
+    spec:
+      containers:
+        - name: hellospring
+          env:
+            - name: DB_HOST
+              value: "10.120.0.6"
+YAML
+
+  cat > "${tmp_bin}/ssh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"-N -L"* ]]; then
+  trap 'exit 0' TERM INT
+  while true; do /bin/sleep 1; done
+fi
+cat >> "${ONECDCTL_TEST_STDIN}"
+STUB
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get --raw=/readyz"* ]]; then
+  printf 'ok\n'
+  exit 0
+fi
+if [[ "$*" == *"get pods"* && "$*" == *"app.kubernetes.io/name=hello"* ]]; then
+  printf 'true Running\n'
+  exit 0
+fi
+if [[ "$*" == *"get pods"* && "$*" == *"app.kubernetes.io/name=hellospring"* ]]; then
+  printf 'true Running\n'
+  exit 0
+fi
+if [[ "$*" == *"apply -f "* ]]; then
+  file="${@: -1}"
+  cat "${file}" >> "${ONECDCTL_TEST_STDIN}"
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${tmp_apps}" --db-ssh-target root@203.0.113.22 --apply)"
+
+  assert_contains "${output}" "demo app dependencies configured"
+  assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply -f "
+  assert_file_contains "${calls_file}" "ssh root@203.0.113.22 sudo sh -s"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps delete pod -l app.kubernetes.io/name=hello --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps delete pod -l app.kubernetes.io/name=hellospring --ignore-not-found"
+  assert_file_contains "${stdin_file}" "name: hello-db"
+  assert_file_contains "${stdin_file}" "name: hellospring-db"
+  assert_file_contains "${stdin_file}" "CREATE DATABASE IF NOT EXISTS hello_app"
+  assert_file_contains "${stdin_file}" "CREATE DATABASE IF NOT EXISTS hellospring_app"
+  assert_file_contains "${stdin_file}" "'10.0.%'"
+  assert_file_contains "${stdin_file}" "IDENTIFIED BY 'hello_password_change_me'"
+  assert_file_contains "${stdin_file}" "IDENTIFIED BY 'hellospring_password_change_me'"
+}
+
 test_bootstrap_dry_run_prints_safe_plan
 test_bootstrap_apply_writes_profile_rewrites_kubeconfig_and_installs_base_components
 test_bootstrap_retries_transient_manifest_apply_failures
@@ -1267,5 +1461,7 @@ test_reset_node_apply_runs_remote_cleanup_script
 test_cleanup_legacy_onecd_dry_run_describes_legacy_resources
 test_cleanup_legacy_onecd_apply_deletes_legacy_resources
 test_connect_migrates_legacy_local_state_to_kadm_dirs
+test_configure_demo_apps_dry_run_describes_secret_and_db_setup
+test_configure_demo_apps_apply_syncs_secrets_and_mysql_users
 
 echo "kadmctl tests passed"
