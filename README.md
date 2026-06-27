@@ -115,12 +115,12 @@ bin/kadmctl bootstrap root@1.2.3.4 \
 The current bootstrap command installs the first K3s Server with embedded etcd, retrieves kubeconfig, rewrites it to a local tunnel endpoint, installs the base platform components, and writes:
 
 ```text
-~/.onecd/clusters/home-prod/cluster.env
-~/.kube/onecd/home-prod.yaml
+~/.kadm/clusters/home-prod/cluster.env
+~/.kube/kadm/home-prod.yaml
 ```
 
 Base component installation includes Gateway API CRDs, Cilium, Argo CD, and Argo Rollouts. These components do not require GitHub or image registry credentials.
-The preferred install path is offline-first: `prepare-assets` runs on a networked machine, `export-assets` creates a portable asset bundle, `import-assets` restores it on the installer machine, and `bootstrap` consumes only `~/.onecd/cache`. The installer pins Gateway API `v1.5.1` experimental assets, Argo CD `v3.4.4`, Argo Rollouts `v1.9.0`, and Cilium `1.19.5`. The Gateway API experimental bundle is intentional because Cilium Gateway support still expects `TLSRoute v1alpha2`. If network access fails while preparing assets, fix that before creating the bundle; the cluster install should not proceed with ad-hoc live downloads.
+The preferred install path is offline-first: `prepare-assets` runs on a networked machine, `export-assets` creates a portable asset bundle, `import-assets` restores it on the installer machine, and `bootstrap` consumes only `~/.kadm/cache`. The installer pins Gateway API `v1.5.1` experimental assets, Argo CD `v3.4.4`, Argo Rollouts `v1.9.0`, and Cilium `1.19.5`. The Gateway API experimental bundle is intentional because Cilium Gateway support still expects `TLSRoute v1alpha2`. If network access fails while preparing assets, fix that before creating the bundle; the cluster install should not proceed with ad-hoc live downloads.
 
 Kubernetes API operations still go through the SSH tunnel. The installer bounds `kubectl` calls with `--request-timeout=30s` and retries idempotent apply/delete/wait operations so transient tunnel failures surface as retries or clear installer failures instead of hung terminal sessions.
 

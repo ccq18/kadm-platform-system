@@ -147,12 +147,41 @@ validate_optional_machine_value() {
   [[ -z "${value}" || "${value}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "${label} contains unsupported characters"
 }
 
+state_root() {
+  echo "${HOME}/.kadm"
+}
+
+legacy_state_root() {
+  echo "${HOME}/.onecd"
+}
+
+kubeconfig_root() {
+  echo "${HOME}/.kube/kadm"
+}
+
+legacy_kubeconfig_root() {
+  echo "${HOME}/.kube/onecd"
+}
+
+ensure_local_state_migrated() {
+  if [[ -d "$(legacy_state_root)" && ! -e "$(state_root)" ]]; then
+    mkdir -p "$(dirname "$(state_root)")"
+    mv "$(legacy_state_root)" "$(state_root)"
+  fi
+  if [[ -d "$(legacy_kubeconfig_root)" && ! -e "$(kubeconfig_root)" ]]; then
+    mkdir -p "$(dirname "$(kubeconfig_root)")"
+    mv "$(legacy_kubeconfig_root)" "$(kubeconfig_root)"
+  fi
+}
+
 tool_dir() {
-  echo "${HOME}/.onecd/bin"
+  ensure_local_state_migrated
+  echo "$(state_root)/bin"
 }
 
 cache_dir() {
-  echo "${HOME}/.onecd/cache"
+  ensure_local_state_migrated
+  echo "$(state_root)/cache"
 }
 
 manifest_cache_dir() {
@@ -404,7 +433,7 @@ cmd_export_assets() {
   require_default_assets
 
   mkdir -p "$(dirname "${output}")"
-  tar -czf "${output}" -C "${HOME}/.onecd" cache
+  tar -czf "${output}" -C "$(state_root)" cache
   chmod 600 "${output}"
   info "offline asset bundle written: ${output}"
 }
@@ -420,8 +449,8 @@ cmd_import_assets() {
     die "offline asset bundle must contain cache/manifests and cache/charts entries"
   fi
 
-  mkdir -p "${HOME}/.onecd"
-  tar -xzf "${archive}" -C "${HOME}/.onecd"
+  mkdir -p "$(state_root)"
+  tar -xzf "${archive}" -C "$(state_root)"
   require_default_assets
   info "offline asset bundle imported: ${archive}"
 }
@@ -637,7 +666,8 @@ require_default_assets() {
 
 profile_dir() {
   local cluster="$1"
-  echo "${HOME}/.onecd/clusters/${cluster}"
+  ensure_local_state_migrated
+  echo "$(state_root)/clusters/${cluster}"
 }
 
 profile_path() {
@@ -647,7 +677,8 @@ profile_path() {
 
 kubeconfig_path_for() {
   local cluster="$1"
-  echo "${HOME}/.kube/onecd/${cluster}.yaml"
+  ensure_local_state_migrated
+  echo "$(kubeconfig_root)/${cluster}.yaml"
 }
 
 write_profile() {
@@ -676,11 +707,28 @@ PROFILE
 
 load_profile() {
   local cluster="$1"
-  local path
+  local path legacy_path expected_kubeconfig legacy_kubeconfig_path
+  ensure_local_state_migrated
   path="$(profile_path "${cluster}")"
+  legacy_path="$(legacy_state_root)/clusters/${cluster}/cluster.env"
+  if [[ ! -f "${path}" && -f "${legacy_path}" ]]; then
+    mkdir -p "$(dirname "${path}")"
+    mv "${legacy_path}" "${path}"
+  fi
   [[ -f "${path}" ]] || die "cluster profile not found: ${path}. Run kadmctl bootstrap first."
   # shellcheck disable=SC1090
   source "${path}"
+
+  expected_kubeconfig="$(kubeconfig_path_for "${cluster}")"
+  legacy_kubeconfig_path="$(legacy_kubeconfig_root)/${cluster}.yaml"
+  if [[ ! -f "${expected_kubeconfig}" && -f "${legacy_kubeconfig_path}" ]]; then
+    mkdir -p "$(dirname "${expected_kubeconfig}")"
+    mv "${legacy_kubeconfig_path}" "${expected_kubeconfig}"
+  fi
+  if [[ "${KUBECONFIG_PATH:-}" != "${expected_kubeconfig}" ]]; then
+    KUBECONFIG_PATH="${expected_kubeconfig}"
+    write_profile "${cluster}" "${MASTER_SSH}" "${MASTER_PRIVATE_IP}" "${KUBECONFIG_PATH}" "${API_LOCAL_PORT}" "${CONSOLE_LOCAL_PORT}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}"
+  fi
 }
 
 rewrite_kubeconfig_for_tunnel() {

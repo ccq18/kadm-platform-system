@@ -49,9 +49,9 @@ test_bootstrap_dry_run_prints_safe_plan() {
   assert_contains "${output}" "K3s Server + embedded etcd"
   assert_contains "${output}" "components: Gateway API, Cilium, Argo CD, Argo Rollouts"
   assert_contains "${output}" "delivery credentials: not required for base components"
-  assert_contains "${output}" "local kubeconfig: ${tmp_home}/.kube/onecd/home-prod.yaml"
+  assert_contains "${output}" "local kubeconfig: ${tmp_home}/.kube/kadm/home-prod.yaml"
 
-  [[ ! -e "${tmp_home}/.onecd/clusters/home-prod/cluster.env" ]] || fail "dry-run wrote profile"
+  [[ ! -e "${tmp_home}/.kadm/clusters/home-prod/cluster.env" ]] || fail "dry-run wrote profile"
 }
 
 test_bootstrap_apply_writes_profile_rewrites_kubeconfig_and_installs_base_components() {
@@ -60,8 +60,8 @@ test_bootstrap_apply_writes_profile_rewrites_kubeconfig_and_installs_base_compon
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   wait_state_file="${tmp_home}/wait-state"
-  cache_dir="${tmp_home}/.onecd/cache/manifests"
-  chart_dir="${tmp_home}/.onecd/cache/charts"
+  cache_dir="${tmp_home}/.kadm/cache/manifests"
+  chart_dir="${tmp_home}/.kadm/cache/charts"
   mkdir -p "${cache_dir}" "${chart_dir}"
   for manifest in \
     https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml \
@@ -163,24 +163,24 @@ STUB
   output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_WAIT_STATE="${wait_state_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" bootstrap root@203.0.113.11 --name home-prod --private-ip 10.0.0.11 --api-port 16445 --console-port 18081 --apply)"
 
   assert_contains "${output}" "cluster profile written"
-  assert_file_contains "${tmp_home}/.onecd/clusters/home-prod/cluster.env" "CLUSTER_NAME=home-prod"
-  assert_file_contains "${tmp_home}/.onecd/clusters/home-prod/cluster.env" "MASTER_SSH=root@203.0.113.11"
-  assert_file_contains "${tmp_home}/.onecd/clusters/home-prod/cluster.env" "K3S_JOIN_SERVER_URL=https://10.0.0.11:6443"
-  assert_file_contains "${tmp_home}/.onecd/clusters/home-prod/cluster.env" "K3S_JOIN_TOKEN=k10test-token::server:test"
-  assert_file_contains "${tmp_home}/.onecd/clusters/home-prod/cluster.env" "API_LOCAL_PORT=16445"
-  assert_file_contains "${tmp_home}/.onecd/clusters/home-prod/cluster.env" "CONSOLE_LOCAL_PORT=18081"
-  assert_file_contains "${tmp_home}/.kube/onecd/home-prod.yaml" "server: https://127.0.0.1:16445"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -f ${tmp_home}/.onecd/cache/manifests/"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s delete validatingadmissionpolicybinding safe-upgrades.gateway.networking.k8s.io --ignore-not-found"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s delete validatingadmissionpolicy safe-upgrades.gateway.networking.k8s.io --ignore-not-found"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s wait --for=condition=Established crd/tlsroutes.gateway.networking.k8s.io --timeout=180s"
+  assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "CLUSTER_NAME=home-prod"
+  assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "MASTER_SSH=root@203.0.113.11"
+  assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "K3S_JOIN_SERVER_URL=https://10.0.0.11:6443"
+  assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "K3S_JOIN_TOKEN=k10test-token::server:test"
+  assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "API_LOCAL_PORT=16445"
+  assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "CONSOLE_LOCAL_PORT=18081"
+  assert_file_contains "${tmp_home}/.kube/kadm/home-prod.yaml" "server: https://127.0.0.1:16445"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -f ${tmp_home}/.kadm/cache/manifests/"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s delete validatingadmissionpolicybinding safe-upgrades.gateway.networking.k8s.io --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s delete validatingadmissionpolicy safe-upgrades.gateway.networking.k8s.io --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s wait --for=condition=Established crd/tlsroutes.gateway.networking.k8s.io --timeout=180s"
   [[ "$(grep -Fc "wait --for=condition=Established crd/gatewayclasses.gateway.networking.k8s.io" "${calls_file}")" -ge 2 ]] || fail "Gateway API CRD wait was not retried"
-  assert_file_contains "${calls_file}" "helm --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml upgrade --install cilium ${tmp_home}/.onecd/cache/charts/cilium-1.19.5.tgz --timeout 10m --disable-openapi-validation"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kube-system get daemonset cilium -o jsonpath="
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -n argocd -f ${tmp_home}/.onecd/cache/manifests/"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd get deploy argocd-server -o jsonpath="
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -n argo-rollouts -f ${tmp_home}/.onecd/cache/manifests/"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argo-rollouts get deploy argo-rollouts -o jsonpath="
+  assert_file_contains "${calls_file}" "helm --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml upgrade --install cilium ${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz --timeout 10m --disable-openapi-validation"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kube-system get daemonset cilium -o jsonpath="
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -n argocd -f ${tmp_home}/.kadm/cache/manifests/"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get deploy argocd-server -o jsonpath="
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -n argo-rollouts -f ${tmp_home}/.kadm/cache/manifests/"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argo-rollouts get deploy argo-rollouts -o jsonpath="
   if grep -Fq "rollout status" "${calls_file}"; then
     fail "bootstrap used watch-based rollout status"
   fi
@@ -195,8 +195,8 @@ test_bootstrap_retries_transient_manifest_apply_failures() {
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   apply_state_file="${tmp_home}/argocd-apply-state"
-  cache_dir="${tmp_home}/.onecd/cache/manifests"
-  chart_dir="${tmp_home}/.onecd/cache/charts"
+  cache_dir="${tmp_home}/.kadm/cache/manifests"
+  chart_dir="${tmp_home}/.kadm/cache/charts"
   mkdir -p "${cache_dir}" "${chart_dir}"
   for manifest in \
     https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml \
@@ -317,8 +317,8 @@ test_bootstrap_uses_cached_manifests_without_network() {
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
-  cache_dir="${tmp_home}/.onecd/cache/manifests"
-  chart_dir="${tmp_home}/.onecd/cache/charts"
+  cache_dir="${tmp_home}/.kadm/cache/manifests"
+  chart_dir="${tmp_home}/.kadm/cache/charts"
   mkdir -p "${cache_dir}" "${chart_dir}"
   for manifest in \
     https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml \
@@ -418,7 +418,7 @@ STUB
 
   assert_contains "${output}" "Using cached Gateway API manifest: ${cache_dir}/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
   assert_contains "${output}" "Using cached Cilium chart: ${chart_dir}/cilium-1.19.5.tgz"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -f ${cache_dir}/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -f ${cache_dir}/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
   if grep -Fq "curl " "${calls_file}"; then
     fail "cached bootstrap called curl"
   fi
@@ -427,25 +427,25 @@ STUB
 test_connect_dry_run_uses_profile() {
   local tmp_home
   tmp_home="$(mktemp -d)"
-  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
-  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
 MASTER_PRIVATE_IP=10.0.0.11
-KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
 API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 K3S_JOIN_SERVER_URL=https://10.0.0.11:6443
 K3S_JOIN_TOKEN=k10test-token::server:test
 PROFILE
-  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
 
   local output
   output="$(run_in_temp_home "${tmp_home}" "${KADMCTL}" connect home-prod --dry-run)"
 
   assert_contains "${output}" "DRY RUN: no tunnel or port-forward will be started"
   assert_contains "${output}" "ssh -N -L 16445:127.0.0.1:6443 root@203.0.113.11"
-  assert_contains "${output}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml -n kadm port-forward svc/kadm 18081:80"
+  assert_contains "${output}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml -n kadm port-forward svc/kadm 18081:80"
   assert_contains "${output}" "http://127.0.0.1:18081"
 }
 
@@ -454,18 +454,18 @@ test_connect_waits_for_api_before_starting_port_forward() {
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
-  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
-  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
 MASTER_PRIVATE_IP=10.0.0.11
-KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
 API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 K3S_JOIN_SERVER_URL=https://10.0.0.11:6443
 K3S_JOIN_TOKEN=k10test-token::server:test
 PROFILE
-  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
 
   cat > "${tmp_bin}/ssh" <<'STUB'
 #!/usr/bin/env bash
@@ -498,8 +498,8 @@ STUB
 
   assert_contains "${output}" "Connected to cluster: home-prod"
   assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get --raw=/readyz"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm port-forward svc/kadm 18081:80"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s get --raw=/readyz"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kadm port-forward svc/kadm 18081:80"
 }
 
 test_status_uses_profile_and_api_tunnel() {
@@ -507,18 +507,18 @@ test_status_uses_profile_and_api_tunnel() {
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
-  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
-  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
 MASTER_PRIVATE_IP=10.0.0.11
-KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
 API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 K3S_JOIN_SERVER_URL=https://10.0.0.11:6443
 K3S_JOIN_TOKEN=k10test-token::server:test
 PROFILE
-  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
 
   cat > "${tmp_bin}/ssh" <<'STUB'
 #!/usr/bin/env bash
@@ -542,13 +542,13 @@ STUB
 
   assert_contains "${output}" "Cluster status: home-prod"
   assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get --raw=/readyz"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get nodes -o wide"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get pods -A -o wide"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kube-system get daemonset cilium -o wide"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kube-system logs -l k8s-app=cilium --all-containers=true --tail=160"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kube-system logs deployment/cilium-operator --all-containers=true --tail=160"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kube-system logs deployment/cilium-operator --all-containers=true --tail=160 --previous"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s get --raw=/readyz"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s get nodes -o wide"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s get pods -A -o wide"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kube-system get daemonset cilium -o wide"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kube-system logs -l k8s-app=cilium --all-containers=true --tail=160"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kube-system logs deployment/cilium-operator --all-containers=true --tail=160"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kube-system logs deployment/cilium-operator --all-containers=true --tail=160 --previous"
 }
 
 test_bootstrap_rejects_unsafe_profile_values() {
@@ -568,17 +568,17 @@ test_configure_delivery_dry_run_describes_required_inputs() {
   local tmp_home tmp_app_configs
   tmp_home="$(mktemp -d)"
   tmp_app_configs="$(mktemp -d)"
-  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
   mkdir -p "${tmp_app_configs}/apps"
-  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
 MASTER_PRIVATE_IP=10.0.0.11
-KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
 API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
-  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
   printf '[]\n' > "${tmp_app_configs}/apps/apps.json"
 
   local output
@@ -601,17 +601,17 @@ test_configure_delivery_apply_creates_secrets_without_token_in_arguments() {
   stdin_file="${tmp_home}/stdin.log"
   port_ready_file="${tmp_home}/argocd-port-ready"
   tmp_app_configs="$(mktemp -d)"
-  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd" "${tmp_home}/onecd-overlay"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${tmp_home}/onecd-overlay"
   mkdir -p "${tmp_app_configs}/apps"
-  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
 MASTER_PRIVATE_IP=10.0.0.11
-KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
 API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
-  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
   cat > "${tmp_app_configs}/apps/apps.json" <<'JSON'
 [
   {
@@ -708,16 +708,16 @@ STUB
 
   assert_contains "${output}" "delivery configuration applied"
   assert_contains "${output}" "Generating Argo CD session token for KADM release console"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get --raw=/readyz"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd get secret argocd-initial-admin-secret"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18081:80"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s get --raw=/readyz"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get secret argocd-initial-admin-secret"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18081:80"
   assert_file_contains "${calls_file}" "curl -fksSL --connect-timeout 10 --max-time 60"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s create namespace kadm"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s create namespace argocd"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s create namespace apps"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s apply -k ${tmp_home}/onecd-overlay"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm rollout restart deployment/kadm"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm get deploy kadm -o jsonpath="
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace kadm"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace argocd"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace apps"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply -k ${tmp_home}/onecd-overlay"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kadm rollout restart deployment/kadm"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kadm get deploy kadm -o jsonpath="
   assert_file_contains "${stdin_file}" "name: kadm-secrets"
   assert_file_contains "${stdin_file}" "name: kadm-apps-config"
   assert_file_contains "${stdin_file}" "generated-argocd-token"
@@ -949,8 +949,8 @@ test_install_tools_dry_run_is_script_managed() {
 
   assert_contains "${output}" "DRY RUN: local tools will not be installed"
   assert_contains "${output}" "tool: helm"
-  assert_contains "${output}" "${tmp_home}/.onecd/bin"
-  [[ ! -e "${tmp_home}/.onecd/bin/helm" ]] || fail "dry-run installed helm"
+  assert_contains "${output}" "${tmp_home}/.kadm/bin"
+  [[ ! -e "${tmp_home}/.kadm/bin/helm" ]] || fail "dry-run installed helm"
 }
 
 test_prepare_assets_dry_run_prints_pinned_assets() {
@@ -964,7 +964,7 @@ test_prepare_assets_dry_run_prints_pinned_assets() {
   assert_contains "${output}" "Argo CD manifest: https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.4/manifests/install.yaml"
   assert_contains "${output}" "Argo Rollouts manifest: https://github.com/argoproj/argo-rollouts/releases/download/v1.9.0/install.yaml"
   assert_contains "${output}" "Cilium chart: https://helm.cilium.io/cilium-1.19.5.tgz"
-  [[ ! -e "${tmp_home}/.onecd/cache/charts/cilium-1.19.5.tgz" ]] || fail "dry-run downloaded chart"
+  [[ ! -e "${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz" ]] || fail "dry-run downloaded chart"
 }
 
 test_prepare_assets_apply_downloads_pinned_assets() {
@@ -1002,8 +1002,8 @@ STUB
   assert_file_contains "${calls_file}" "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.4/manifests/install.yaml"
   assert_file_contains "${calls_file}" "https://github.com/argoproj/argo-rollouts/releases/download/v1.9.0/install.yaml"
   assert_file_contains "${calls_file}" "https://helm.cilium.io/cilium-1.19.5.tgz"
-  [[ -s "${tmp_home}/.onecd/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml" ]] || fail "missing Gateway API cache"
-  [[ -s "${tmp_home}/.onecd/cache/charts/cilium-1.19.5.tgz" ]] || fail "missing Cilium chart cache"
+  [[ -s "${tmp_home}/.kadm/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml" ]] || fail "missing Gateway API cache"
+  [[ -s "${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz" ]] || fail "missing Cilium chart cache"
 }
 
 test_prepare_assets_reuses_compatible_legacy_manifest_cache() {
@@ -1011,8 +1011,8 @@ test_prepare_assets_reuses_compatible_legacy_manifest_cache() {
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
-  cache_dir="${tmp_home}/.onecd/cache/manifests"
-  chart_dir="${tmp_home}/.onecd/cache/charts"
+  cache_dir="${tmp_home}/.kadm/cache/manifests"
+  chart_dir="${tmp_home}/.kadm/cache/charts"
   mkdir -p "${cache_dir}" "${chart_dir}"
   cat > "${cache_dir}/https___raw.githubusercontent.com_argoproj_argo-cd_stable_manifests_install.yaml.yaml" <<'YAML'
 apiVersion: apps/v1
@@ -1069,12 +1069,12 @@ STUB
 test_export_assets_packages_offline_cache() {
   local tmp_home bundle
   tmp_home="$(mktemp -d)"
-  bundle="${tmp_home}/onecd-assets.tgz"
-  mkdir -p "${tmp_home}/.onecd/cache/manifests" "${tmp_home}/.onecd/cache/charts"
-  printf 'gateway\n' > "${tmp_home}/.onecd/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
-  printf 'argocd\n' > "${tmp_home}/.onecd/cache/manifests/https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml"
-  printf 'rollouts\n' > "${tmp_home}/.onecd/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
-  printf 'chart\n' > "${tmp_home}/.onecd/cache/charts/cilium-1.19.5.tgz"
+  bundle="${tmp_home}/kadm-platform-assets.tgz"
+  mkdir -p "${tmp_home}/.kadm/cache/manifests" "${tmp_home}/.kadm/cache/charts"
+  printf 'gateway\n' > "${tmp_home}/.kadm/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
+  printf 'argocd\n' > "${tmp_home}/.kadm/cache/manifests/https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml"
+  printf 'rollouts\n' > "${tmp_home}/.kadm/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
+  printf 'chart\n' > "${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz"
 
   local output
   output="$(run_in_temp_home "${tmp_home}" "${KADMCTL}" export-assets --output "${bundle}")"
@@ -1088,20 +1088,20 @@ test_import_assets_restores_offline_cache() {
   local src_home dst_home bundle
   src_home="$(mktemp -d)"
   dst_home="$(mktemp -d)"
-  bundle="${src_home}/onecd-assets.tgz"
-  mkdir -p "${src_home}/.onecd/cache/manifests" "${src_home}/.onecd/cache/charts"
-  printf 'gateway\n' > "${src_home}/.onecd/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
-  printf 'argocd\n' > "${src_home}/.onecd/cache/manifests/https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml"
-  printf 'rollouts\n' > "${src_home}/.onecd/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
-  printf 'chart\n' > "${src_home}/.onecd/cache/charts/cilium-1.19.5.tgz"
+  bundle="${src_home}/kadm-platform-assets.tgz"
+  mkdir -p "${src_home}/.kadm/cache/manifests" "${src_home}/.kadm/cache/charts"
+  printf 'gateway\n' > "${src_home}/.kadm/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
+  printf 'argocd\n' > "${src_home}/.kadm/cache/manifests/https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml"
+  printf 'rollouts\n' > "${src_home}/.kadm/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
+  printf 'chart\n' > "${src_home}/.kadm/cache/charts/cilium-1.19.5.tgz"
   HOME="${src_home}" "${KADMCTL}" export-assets --output "${bundle}" >/dev/null
 
   local output
   output="$(HOME="${dst_home}" "${KADMCTL}" import-assets "${bundle}")"
 
   assert_contains "${output}" "offline asset bundle imported"
-  [[ -s "${dst_home}/.onecd/cache/charts/cilium-1.19.5.tgz" ]] || fail "import missing Cilium chart"
-  [[ -s "${dst_home}/.onecd/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml" ]] || fail "import missing Gateway API manifest"
+  [[ -s "${dst_home}/.kadm/cache/charts/cilium-1.19.5.tgz" ]] || fail "import missing Cilium chart"
+  [[ -s "${dst_home}/.kadm/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml" ]] || fail "import missing Gateway API manifest"
 }
 
 test_reset_node_dry_run_is_safe() {
@@ -1145,16 +1145,16 @@ STUB
 test_cleanup_legacy_onecd_dry_run_describes_legacy_resources() {
   local tmp_home
   tmp_home="$(mktemp -d)"
-  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
-  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
 MASTER_PRIVATE_IP=10.0.0.11
-KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
 API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
-  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
 
   local output
   output="$(HOME="${tmp_home}" "${KADMCTL}" cleanup-legacy-onecd home-prod --dry-run)"
@@ -1171,16 +1171,16 @@ test_cleanup_legacy_onecd_apply_deletes_legacy_resources() {
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
-  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
-  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
 MASTER_PRIVATE_IP=10.0.0.11
-KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
 API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
-  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
 
   cat > "${tmp_bin}/ssh" <<'STUB'
 #!/usr/bin/env bash
@@ -1207,12 +1207,39 @@ STUB
 
   assert_contains "${output}" "legacy onecd resources deleted"
   assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get --raw=/readyz"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd delete application onecd --ignore-not-found"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd delete secret repo-onecd --ignore-not-found"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n apps delete role onecd-rollouts --ignore-not-found"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s delete clusterrole onecd-cluster-read --ignore-not-found"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s delete namespace onecd --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s get --raw=/readyz"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd delete application onecd --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd delete secret repo-onecd --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps delete role onecd-rollouts --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s delete clusterrole onecd-cluster-read --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s delete namespace onecd --ignore-not-found"
+}
+
+test_connect_migrates_legacy_local_state_to_kadm_dirs() {
+  local tmp_home
+  tmp_home="$(mktemp -d)"
+  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
+  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+K3S_JOIN_SERVER_URL=https://10.0.0.11:6443
+K3S_JOIN_TOKEN=k10test-token::server:test
+PROFILE
+  printf 'apiVersion: v1\n' > "${tmp_home}/.kube/onecd/home-prod.yaml"
+
+  local output
+  output="$(HOME="${tmp_home}" "${KADMCTL}" connect home-prod --dry-run)"
+
+  assert_contains "${output}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml -n kadm port-forward svc/kadm 18081:80"
+  [[ -f "${tmp_home}/.kadm/clusters/home-prod/cluster.env" ]] || fail "legacy profile was not migrated"
+  [[ -f "${tmp_home}/.kube/kadm/home-prod.yaml" ]] || fail "legacy kubeconfig was not migrated"
+  [[ ! -e "${tmp_home}/.onecd/clusters/home-prod/cluster.env" ]] || fail "legacy profile was not moved"
+  [[ ! -e "${tmp_home}/.kube/onecd/home-prod.yaml" ]] || fail "legacy kubeconfig was not moved"
+  assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "KUBECONFIG_PATH=${tmp_home}/.kube/kadm/home-prod.yaml"
 }
 
 test_bootstrap_dry_run_prints_safe_plan
@@ -1239,5 +1266,6 @@ test_reset_node_dry_run_is_safe
 test_reset_node_apply_runs_remote_cleanup_script
 test_cleanup_legacy_onecd_dry_run_describes_legacy_resources
 test_cleanup_legacy_onecd_apply_deletes_legacy_resources
+test_connect_migrates_legacy_local_state_to_kadm_dirs
 
 echo "kadmctl tests passed"
