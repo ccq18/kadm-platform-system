@@ -1709,12 +1709,13 @@ PY
 
 emit_kadm_apps_config_yaml() {
   local apps_file="$1"
+  local configmap_name="${2:-kadm-apps-config}"
   [[ -f "${apps_file}" ]] || die "app config file not found: ${apps_file}"
   cat <<YAML
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kadm-apps-config
+  name: ${configmap_name}
   namespace: kadm
 data:
   apps.json: |
@@ -2295,7 +2296,8 @@ cmd_configure_delivery() {
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
 
     emit_onecd_secret_yaml "${ONECD_GITHUB_TOKEN}" "${argocd_token}" "${argocd_base_url}" "${CLUSTER_NAME}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-source-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml kadm-app-configs "https://github.com/ccq18/kadm-app-configs.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" kadm "k8s/overlays/prod" "main" "system" | apply_delivery_yaml "${KUBECONFIG_PATH}"

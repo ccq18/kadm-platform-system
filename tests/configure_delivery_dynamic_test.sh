@@ -142,6 +142,7 @@ STUB
   assert_file_contains "${stdin_file}" "path: apps/alpha/overlays/prod"
   assert_file_contains "${stdin_file}" "name: beta"
   assert_file_contains "${stdin_file}" "namespace: beta-space"
+  assert_file_contains "${stdin_file}" "name: kadm-source-apps-config"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd delete application legacy-one --ignore-not-found"
 }
 
