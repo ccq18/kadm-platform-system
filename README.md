@@ -81,6 +81,27 @@ The `--apply` mode must not be added casually. It must print the target host, cl
 
 `bin/kadmctl` provides the first local installer workflow.
 
+Day-0 entrypoints are now the bootstrap scripts under [`bootstrap/`](/Users/lrd/mnt/homepc/data/homepcdata/kadm-platform-system/bootstrap):
+
+```bash
+# On the first server.
+export KADM_GITHUB_TOKEN=<github-token>
+curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm.sh | \
+  bash -s -- all --cluster home-prod --access-host root@203.0.113.11 --private-ip 10.0.0.11
+
+# On the operator laptop.
+curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm-client.sh | \
+  bash -s -- --cluster home-prod --server root@203.0.113.11
+```
+
+`install-kadm.sh` splits first install into:
+
+- `prepare`: download repos, import the offline bundle, install local helper tools
+- `deploy`: install local K3s, install platform components, configure release-console delivery
+- `all`: run both phases
+
+`kadmctl` remains the day-2 tool after bootstrap.
+
 Bootstrap always starts from one empty server:
 
 ```bash

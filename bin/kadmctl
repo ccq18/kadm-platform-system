@@ -5,7 +5,8 @@ DEFAULT_CLUSTER="default"
 DEFAULT_API_PORT="16443"
 DEFAULT_CONSOLE_PORT="18080"
 DEFAULT_ARGOCD_LOCAL_PORT="18081"
-DEFAULT_K3S_VERSION=""
+DEFAULT_K3S_VERSION="${KADM_DEFAULT_K3S_VERSION:-v1.36.2+k3s1}"
+DEFAULT_K3S_ARCH="${KADM_DEFAULT_K3S_ARCH:-amd64}"
 DEFAULT_GATEWAY_API_VERSION="v1.5.1"
 DEFAULT_ARGOCD_VERSION="v3.4.4"
 DEFAULT_ROLLOUTS_VERSION="v1.9.0"
@@ -17,6 +18,9 @@ DEFAULT_GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases
 DEFAULT_ARGOCD_URL="https://raw.githubusercontent.com/argoproj/argo-cd/${DEFAULT_ARGOCD_VERSION}/manifests/install.yaml"
 DEFAULT_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/download/${DEFAULT_ROLLOUTS_VERSION}/install.yaml"
 DEFAULT_CILIUM_CHART_URL="https://helm.cilium.io/cilium-${DEFAULT_CILIUM_VERSION}.tgz"
+DEFAULT_K3S_INSTALL_SCRIPT_URL="https://get.k3s.io"
+DEFAULT_K3S_BINARY_URL="https://github.com/k3s-io/k3s/releases/download/${DEFAULT_K3S_VERSION}/k3s"
+DEFAULT_K3S_AIRGAP_IMAGES_URL="https://github.com/k3s-io/k3s/releases/download/${DEFAULT_K3S_VERSION}/k3s-airgap-images-${DEFAULT_K3S_ARCH}.tar.zst"
 LEGACY_GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/experimental-install.yaml"
 LEGACY_ARGOCD_URL="https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
 LEGACY_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml"
@@ -33,6 +37,7 @@ kadmctl - local installer and connector for the KADM platform
 
 Usage:
   kadmctl bootstrap <ssh-target> [--name <cluster>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--cilium-version <version>] [--skip-components] [--dry-run|--apply]
+  kadmctl deploy [--name <cluster>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--cilium-version <version>] [--dns-upstream <ip>]... [--skip-components] [--dry-run|--apply]
   kadmctl install-tools [--dry-run|--apply]
   kadmctl prepare-assets [--refresh] [--dry-run|--apply]
   kadmctl export-assets --output <path>
@@ -41,6 +46,7 @@ Usage:
   kadmctl publish-onecd [--onecd-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
   kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--app-configs-dir <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--dry-run|--apply]
   kadmctl configure-demo-apps [cluster] [--app-configs-dir <path>] [--db-ssh-target <ssh-target>] [--db-node-ip <ip>] [--dry-run|--apply]
+  kadmctl configure-cluster-dns [cluster] [--upstream <ip>]... [--dry-run|--apply]
   kadmctl connect [cluster] [--api-port <port>] [--console-port <port>] [--dry-run]
   kadmctl status [cluster] [--api-port <port>]
   kadmctl reset-node <ssh-target> [--dry-run|--apply]
@@ -49,6 +55,7 @@ Usage:
 
 Examples:
   kadmctl bootstrap root@1.2.3.4 --name home-prod --private-ip 10.0.0.11 --apply
+  kadmctl deploy --name home-prod --access-host root@203.0.113.11 --private-ip 10.0.0.11 --apply
   kadmctl install-tools --apply
   kadmctl prepare-assets --apply
   kadmctl export-assets --output kadm-platform-assets.tgz
@@ -56,6 +63,7 @@ Examples:
   KADM_GITHUB_TOKEN=... kadmctl publish-release-console --tag sha-1234567 --apply
   KADM_GITHUB_TOKEN=... kadmctl configure-delivery home-prod --apply
   kadmctl configure-demo-apps home-prod --app-configs-dir /path/to/kadm-app-configs --apply
+  kadmctl configure-cluster-dns home-prod --upstream 1.1.1.1 --upstream 8.8.8.8 --apply
   kadmctl connect home-prod
   kadmctl status home-prod
   kadmctl reset-node root@1.2.3.4 --apply
@@ -65,6 +73,8 @@ Examples:
 Safety:
   bootstrap defaults to --dry-run. Remote changes require --apply.
   bootstrap consumes cached component assets. Run prepare-assets before bootstrap.
+  deploy defaults to --dry-run. Local changes require --apply.
+  deploy consumes cached component assets. Run prepare-assets or import-assets before deploy.
   reset-node defaults to --dry-run. Remote cleanup requires --apply.
   connect uses SSH tunnel by default; Kubernetes API does not need public exposure.
 USAGE
@@ -146,7 +156,7 @@ validate_ssh_target() {
 validate_optional_machine_value() {
   local label="$1"
   local value="$2"
-  [[ -z "${value}" || "${value}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "${label} contains unsupported characters"
+  [[ -z "${value}" || "${value}" =~ ^[A-Za-z0-9._:+-]+$ ]] || die "${label} contains unsupported characters"
 }
 
 state_root() {
@@ -197,6 +207,25 @@ chart_cache_dir() {
 cilium_chart_path() {
   local version="$1"
   echo "$(chart_cache_dir)/cilium-${version}.tgz"
+}
+
+k3s_cache_dir() {
+  echo "$(cache_dir)/k3s"
+}
+
+k3s_install_script_path() {
+  local version="$1"
+  echo "$(k3s_cache_dir)/install-${version}.sh"
+}
+
+k3s_binary_path() {
+  local version="$1"
+  echo "$(k3s_cache_dir)/k3s-${version}"
+}
+
+k3s_airgap_images_path() {
+  local version="$1"
+  echo "$(k3s_cache_dir)/k3s-airgap-images-${version}-${DEFAULT_K3S_ARCH}.tar.zst"
 }
 
 detect_platform() {
@@ -330,17 +359,30 @@ REMOTE
 cmd_prepare_assets() {
   local apply=0
   local refresh=0
+  local k3s_version="${DEFAULT_K3S_VERSION}"
   local gateway_api_url="${DEFAULT_GATEWAY_API_URL}"
   local argocd_url="${DEFAULT_ARGOCD_URL}"
   local rollouts_url="${DEFAULT_ROLLOUTS_URL}"
   local cilium_version="${DEFAULT_CILIUM_VERSION}"
   local cilium_chart_url="${DEFAULT_CILIUM_CHART_URL}"
+  local k3s_install_script_url="${DEFAULT_K3S_INSTALL_SCRIPT_URL}"
+  local k3s_binary_url=""
+  local k3s_airgap_images_url=""
+
+  k3s_binary_url="https://github.com/k3s-io/k3s/releases/download/${k3s_version}/k3s"
+  k3s_airgap_images_url="https://github.com/k3s-io/k3s/releases/download/${k3s_version}/k3s-airgap-images-${DEFAULT_K3S_ARCH}.tar.zst"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --refresh)
         refresh=1
         shift
+        ;;
+      --k3s-version)
+        k3s_version="${2:-}"
+        k3s_binary_url="https://github.com/k3s-io/k3s/releases/download/${k3s_version}/k3s"
+        k3s_airgap_images_url="https://github.com/k3s-io/k3s/releases/download/${k3s_version}/k3s-airgap-images-${DEFAULT_K3S_ARCH}.tar.zst"
+        shift 2
         ;;
       --gateway-api-url)
         gateway_api_url="${2:-}"
@@ -381,20 +423,30 @@ cmd_prepare_assets() {
     esac
   done
 
+  validate_optional_machine_value "k3s version" "${k3s_version}"
   validate_optional_machine_value "cilium version" "${cilium_version}"
 
-  local gateway_path argocd_path rollouts_path cilium_chart_path_value
+  local gateway_path argocd_path rollouts_path cilium_chart_path_value k3s_install_path k3s_binary_path_value k3s_airgap_path
   gateway_path="$(manifest_cache_path "${gateway_api_url}")"
   argocd_path="$(manifest_cache_path "${argocd_url}")"
   rollouts_path="$(manifest_cache_path "${rollouts_url}")"
   cilium_chart_path_value="$(cilium_chart_path "${cilium_version}")"
+  k3s_install_path="$(k3s_install_script_path "${k3s_version}")"
+  k3s_binary_path_value="$(k3s_binary_path "${k3s_version}")"
+  k3s_airgap_path="$(k3s_airgap_images_path "${k3s_version}")"
 
   if [[ "${apply}" -ne 1 ]]; then
     info "DRY RUN: installer assets will not be downloaded"
+    info "K3s install script: ${k3s_install_script_url}"
+    info "K3s binary: ${k3s_binary_url}"
+    info "K3s airgap images: ${k3s_airgap_images_url}"
     info "Gateway API manifest: ${gateway_api_url}"
     info "Argo CD manifest: ${argocd_url}"
     info "Argo Rollouts manifest: ${rollouts_url}"
     info "Cilium chart: ${cilium_chart_url}"
+    info "cache: ${k3s_install_path}"
+    info "cache: ${k3s_binary_path_value}"
+    info "cache: ${k3s_airgap_path}"
     info "cache: ${gateway_path}"
     info "cache: ${argocd_path}"
     info "cache: ${rollouts_path}"
@@ -402,6 +454,9 @@ cmd_prepare_assets() {
     return 0
   fi
 
+  download_file_to_cache "${k3s_install_script_url}" "${k3s_install_path}" "${refresh}" "K3s install script"
+  download_file_to_cache "${k3s_binary_url}" "${k3s_binary_path_value}" "${refresh}" "K3s binary"
+  download_file_to_cache "${k3s_airgap_images_url}" "${k3s_airgap_path}" "${refresh}" "K3s airgap images"
   prepare_manifest_asset_with_legacy "${gateway_api_url}" "${refresh}" "Gateway API manifest" "gateway.networking.k8s.io/channel: experimental" "${LEGACY_GATEWAY_API_URL}"
   prepare_manifest_asset_with_legacy "${argocd_url}" "${refresh}" "Argo CD manifest" "quay.io/argoproj/argocd:${DEFAULT_ARGOCD_VERSION}" "${LEGACY_ARGOCD_URL}"
   prepare_manifest_asset_with_legacy "${rollouts_url}" "${refresh}" "Argo Rollouts manifest" "quay.io/argoproj/argo-rollouts:${DEFAULT_ROLLOUTS_VERSION}" "${LEGACY_ROLLOUTS_URL}"
@@ -666,6 +721,21 @@ require_default_assets() {
   require_cached_file "${cilium_path}" "Cilium chart"
 }
 
+require_local_k3s_assets() {
+  local version="$1"
+  require_cached_file "$(k3s_install_script_path "${version}")" "K3s install script"
+  require_cached_file "$(k3s_binary_path "${version}")" "K3s binary"
+  require_cached_file "$(k3s_airgap_images_path "${version}")" "K3s airgap images"
+}
+
+detect_local_private_ip() {
+  if command -v ip >/dev/null 2>&1; then
+    ip -o -4 route show to default 2>/dev/null | awk '{print $7; exit}'
+    return 0
+  fi
+  return 1
+}
+
 profile_dir() {
   local cluster="$1"
   ensure_local_state_migrated
@@ -717,7 +787,7 @@ load_profile() {
     mkdir -p "$(dirname "${path}")"
     mv "${legacy_path}" "${path}"
   fi
-  [[ -f "${path}" ]] || die "cluster profile not found: ${path}. Run kadmctl bootstrap first."
+  [[ -f "${path}" ]] || die "cluster profile not found: ${path}. Run kadmctl deploy or kadmctl bootstrap first."
   # shellcheck disable=SC1090
   source "${path}"
 
@@ -784,6 +854,67 @@ fetch_remote_kubeconfig() {
 fetch_remote_join_token() {
   local ssh_target="$1"
   ssh "${ssh_target}" "sudo cat /var/lib/rancher/k3s/server/node-token"
+}
+
+install_local_k3s() {
+  local private_ip="$1"
+  local k3s_version="$2"
+  local install_script binary airgap_images
+  install_script="$(k3s_install_script_path "${k3s_version}")"
+  binary="$(k3s_binary_path "${k3s_version}")"
+  airgap_images="$(k3s_airgap_images_path "${k3s_version}")"
+
+  require_local_k3s_assets "${k3s_version}"
+  info "Using cached K3s install script: ${install_script}"
+  info "Using cached K3s binary: ${binary}"
+  info "Using cached K3s airgap images: ${airgap_images}"
+
+  sudo env \
+    KADM_K3S_PRIVATE_IP="${private_ip}" \
+    KADM_K3S_VERSION="${k3s_version}" \
+    KADM_K3S_INSTALL_SCRIPT="${install_script}" \
+    KADM_K3S_BINARY="${binary}" \
+    KADM_K3S_AIRGAP_IMAGES="${airgap_images}" \
+    sh -s <<'LOCAL'
+set -eu
+
+if command -v k3s >/dev/null 2>&1; then
+  echo "k3s already installed; leaving existing installation in place"
+  exit 0
+fi
+
+install -D -m 0755 "${KADM_K3S_BINARY}" /usr/local/bin/k3s
+mkdir -p /var/lib/rancher/k3s/agent/images
+install -D -m 0644 "${KADM_K3S_AIRGAP_IMAGES}" "/var/lib/rancher/k3s/agent/images/$(basename "${KADM_K3S_AIRGAP_IMAGES}")"
+
+export INSTALL_K3S_SKIP_DOWNLOAD=true
+export INSTALL_K3S_BIN_DIR=/usr/local/bin
+
+args="server --cluster-init --flannel-backend=none --disable-network-policy --disable-kube-proxy --disable=traefik --disable=servicelb --write-kubeconfig-mode=0600"
+if [ -n "${KADM_K3S_PRIVATE_IP:-}" ]; then
+  args="${args} --node-ip ${KADM_K3S_PRIVATE_IP} --advertise-address ${KADM_K3S_PRIVATE_IP}"
+fi
+
+INSTALL_K3S_VERSION="${KADM_K3S_VERSION}" sh "${KADM_K3S_INSTALL_SCRIPT}" ${args}
+LOCAL
+}
+
+fetch_local_kubeconfig() {
+  local output_file="$1"
+  sudo cat /etc/rancher/k3s/k3s.yaml > "${output_file}"
+}
+
+fetch_local_join_token() {
+  sudo cat /var/lib/rancher/k3s/server/node-token
+}
+
+copy_local_kubeconfig() {
+  local source_file="$1"
+  local target_file="$2"
+
+  mkdir -p "$(dirname "${target_file}")"
+  cp "${source_file}" "${target_file}"
+  chmod 600 "${target_file}"
 }
 
 ssh_host_part() {
@@ -1074,11 +1205,56 @@ install_component_commands() {
   create_namespace_if_missing "${kubeconfig_path}" argocd
   kubectl_apply_retry "${kubeconfig_path}" --server-side --force-conflicts -n argocd -f "${argocd_manifest}"
   wait_for_deployment_ready "${kubeconfig_path}" argocd argocd-server 600
+  wait_for_deployment_ready "${kubeconfig_path}" argocd argocd-repo-server 600
 
   info "Installing Argo Rollouts"
   create_namespace_if_missing "${kubeconfig_path}" argo-rollouts
   kubectl_apply_retry "${kubeconfig_path}" --server-side --force-conflicts -n argo-rollouts -f "${rollouts_manifest}"
   wait_for_deployment_ready "${kubeconfig_path}" argo-rollouts argo-rollouts 600
+}
+
+apply_cluster_dns_upstreams() {
+  local kubeconfig_path="$1"
+  shift
+  local upstreams=("$@")
+
+  emit_coredns_config_yaml coredns "${upstreams[@]}" | apply_delivery_yaml "${kubeconfig_path}"
+  kubectl_retry "${kubeconfig_path}" -n kube-system rollout restart deployment/coredns
+  wait_for_deployment_ready "${kubeconfig_path}" kube-system coredns 300
+}
+
+validate_gitops_dns() {
+  local kubeconfig_path="$1"
+  shift
+  local upstreams=("$@")
+
+  if kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
+if command -v getent >/dev/null 2>&1; then
+  getent hosts github.com >/dev/null
+  getent hosts ghcr.io >/dev/null
+fi
+git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
+'; then
+    info "GitOps DNS validation passed"
+    return 0
+  fi
+
+  info "GitOps DNS validation failed"
+  if [[ "${#upstreams[@]}" -eq 0 ]]; then
+    die "cluster pods cannot resolve GitHub endpoints; rerun deploy with --dns-upstream or fix cluster DNS"
+  fi
+
+  info "Applying CoreDNS upstream override: ${upstreams[*]}"
+  apply_cluster_dns_upstreams "${kubeconfig_path}" "${upstreams[@]}"
+
+  kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
+if command -v getent >/dev/null 2>&1; then
+  getent hosts github.com >/dev/null
+  getent hosts ghcr.io >/dev/null
+fi
+git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
+'
+  info "GitOps DNS validation passed after CoreDNS override"
 }
 
 install_base_components() {
@@ -1448,6 +1624,43 @@ data:
 YAML
 }
 
+emit_coredns_config_yaml() {
+  shift
+  local upstreams=("$@")
+  [[ "${#upstreams[@]}" -gt 0 ]] || die "at least one DNS upstream is required"
+  cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+          pods insecure
+          fallthrough in-addr.arpa ip6.arpa
+        }
+        hosts /etc/coredns/NodeHosts {
+          ttl 60
+          reload 15s
+          fallthrough
+        }
+        prometheus :9153
+        cache 30
+        loop
+        reload
+        loadbalance
+        import /etc/coredns/custom/*.override
+        forward . ${upstreams[*]}
+    }
+    import /etc/coredns/custom/*.server
+YAML
+}
+
 extract_yaml_string_field() {
   local file="$1"
   local key="$2"
@@ -1521,6 +1734,165 @@ GRANT ALL PRIVILEGES ON ${db_name}.* TO '${user}'@'10.120.0.%';
 FLUSH PRIVILEGES;
 SQL
 REMOTE
+}
+
+cmd_deploy() {
+  local cluster="${DEFAULT_CLUSTER}"
+  local access_host=""
+  local private_ip=""
+  local api_port="${DEFAULT_API_PORT}"
+  local console_port="${DEFAULT_CONSOLE_PORT}"
+  local k3s_version="${DEFAULT_K3S_VERSION}"
+  local cilium_version=""
+  local gateway_api_url="${DEFAULT_GATEWAY_API_URL}"
+  local argocd_url="${DEFAULT_ARGOCD_URL}"
+  local rollouts_url="${DEFAULT_ROLLOUTS_URL}"
+  local skip_components=0
+  local apply=0
+  local dns_upstreams=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        cluster="${2:-}"
+        shift 2
+        ;;
+      --access-host)
+        access_host="${2:-}"
+        shift 2
+        ;;
+      --private-ip)
+        private_ip="${2:-}"
+        shift 2
+        ;;
+      --api-port)
+        api_port="${2:-}"
+        shift 2
+        ;;
+      --console-port)
+        console_port="${2:-}"
+        shift 2
+        ;;
+      --k3s-version)
+        k3s_version="${2:-}"
+        shift 2
+        ;;
+      --cilium-version)
+        cilium_version="${2:-}"
+        shift 2
+        ;;
+      --gateway-api-url)
+        gateway_api_url="${2:-}"
+        shift 2
+        ;;
+      --argocd-url)
+        argocd_url="${2:-}"
+        shift 2
+        ;;
+      --rollouts-url)
+        rollouts_url="${2:-}"
+        shift 2
+        ;;
+      --dns-upstream)
+        dns_upstreams+=("${2:-}")
+        shift 2
+        ;;
+      --skip-components)
+        skip_components=1
+        shift
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown deploy option: $1"
+        ;;
+      *)
+        die "unexpected deploy argument: $1"
+        ;;
+    esac
+  done
+
+  validate_cluster_name "${cluster}"
+  [[ -n "${access_host}" ]] || die "deploy requires --access-host <ssh-target> so client setup knows how to reach the primary node"
+  validate_ssh_target "${access_host}"
+  validate_optional_machine_value "private ip" "${private_ip}"
+  validate_optional_machine_value "k3s version" "${k3s_version}"
+  validate_optional_machine_value "cilium version" "${cilium_version}"
+  validate_port "${api_port}"
+  validate_port "${console_port}"
+
+  if [[ -z "${private_ip}" ]]; then
+    private_ip="$(detect_local_private_ip || true)"
+  fi
+  [[ -n "${private_ip}" ]] || die "deploy requires --private-ip or a detectable default IPv4 address"
+
+  local kubeconfig_path
+  kubeconfig_path="$(kubeconfig_path_for "${cluster}")"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: no local changes will be made"
+    info "cluster: ${cluster}"
+    info "access host: ${access_host}"
+    info "private ip: ${private_ip}"
+    info "install: local K3s Server + embedded etcd"
+    if [[ "${skip_components}" -eq 1 ]]; then
+      info "components: skipped"
+      info "gitops dns validation: skipped"
+    else
+      info "components: Gateway API, Cilium, Argo CD, Argo Rollouts"
+      info "gitops dns validation: enabled"
+    fi
+    info "local kubeconfig: ${kubeconfig_path}"
+    info "cluster profile: $(profile_path "${cluster}")"
+    info "next: kadmctl configure-delivery ${cluster} --apply"
+    return 0
+  fi
+
+  require_command sudo
+  require_command sed
+  require_command mktemp
+
+  info "Installing first local K3s server"
+  install_local_k3s "${private_ip}" "${k3s_version}"
+
+  local tmp_kubeconfig
+  tmp_kubeconfig="$(mktemp)"
+
+  info "Fetching local kubeconfig"
+  fetch_local_kubeconfig "${tmp_kubeconfig}"
+  copy_local_kubeconfig "${tmp_kubeconfig}" "${kubeconfig_path}"
+  rm -f "${tmp_kubeconfig}"
+  local join_token join_server_url
+  join_token="$(fetch_local_join_token)"
+  join_server_url="https://${private_ip}:6443"
+  write_profile "${cluster}" "${access_host}" "${private_ip}" "${kubeconfig_path}" "${api_port}" "${console_port}" "${join_server_url}" "${join_token}"
+
+  if [[ "${skip_components}" -ne 1 ]]; then
+    require_command kubectl
+    ensure_helm
+    install_component_commands "${kubeconfig_path}" "${gateway_api_url}" "${argocd_url}" "${rollouts_url}" "${cilium_version}" "${private_ip}"
+    if [[ "${#dns_upstreams[@]}" -gt 0 ]]; then
+      validate_gitops_dns "${kubeconfig_path}" "${dns_upstreams[@]}"
+    else
+      validate_gitops_dns "${kubeconfig_path}"
+    fi
+  else
+    info "Skipping base component installation"
+  fi
+
+  info "cluster profile written: $(profile_path "${cluster}")"
+  info "local kubeconfig written: ${kubeconfig_path}"
+  info "next: kadmctl configure-delivery ${cluster} --apply"
 }
 
 cmd_bootstrap() {
@@ -2197,6 +2569,69 @@ cmd_configure_demo_apps() {
   info "demo app dependencies configured"
 }
 
+cmd_configure_cluster_dns() {
+  local cluster="${DEFAULT_CLUSTER}"
+  local apply=0
+  local cluster_seen=0
+  local upstreams=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --upstream)
+        upstreams+=("${2:-}")
+        shift 2
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown configure-cluster-dns option: $1"
+        ;;
+      *)
+        if [[ "${cluster_seen}" -eq 1 ]]; then
+          die "unexpected configure-cluster-dns argument: $1"
+        fi
+        cluster="$1"
+        cluster_seen=1
+        shift
+        ;;
+    esac
+  done
+
+  validate_cluster_name "${cluster}"
+  [[ "${#upstreams[@]}" -gt 0 ]] || upstreams=("1.1.1.1" "8.8.8.8")
+  load_profile "${cluster}"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: cluster DNS configuration will not be changed"
+    info "cluster: ${CLUSTER_NAME}"
+    info "upstreams: ${upstreams[*]}"
+    return 0
+  fi
+
+  require_command ssh
+  require_command kubectl
+  [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
+
+  local tunnel_pid
+  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
+
+  apply_cluster_dns_upstreams "${KUBECONFIG_PATH}" "${upstreams[@]}"
+
+  stop_pid "${tunnel_pid}"
+  info "cluster dns configured"
+}
+
 main() {
   local command="${1:-help}"
   if [[ $# -gt 0 ]]; then
@@ -2206,6 +2641,9 @@ main() {
   case "${command}" in
     bootstrap)
       cmd_bootstrap "$@"
+      ;;
+    deploy)
+      cmd_deploy "$@"
       ;;
     install-tools)
       cmd_install_tools "$@"
@@ -2242,6 +2680,9 @@ main() {
       ;;
     configure-demo-apps)
       cmd_configure_demo_apps "$@"
+      ;;
+    configure-cluster-dns)
+      cmd_configure_cluster_dns "$@"
       ;;
     help|-h|--help)
       usage
