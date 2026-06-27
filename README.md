@@ -127,17 +127,18 @@ Kubernetes API operations still go through the SSH tunnel. The installer bounds 
 Configure delivery credentials after bootstrap:
 
 ```bash
-# Optional, when deploying a locally changed KADM release console image.
-export ONECD_GHCR_USERNAME=<github-user>
-export ONECD_GHCR_TOKEN=<ghcr-token>
-bin/kadmctl publish-onecd --tag <image-tag> --apply
+# Optional, when triggering a KADM release console build through GitHub Actions.
+export KADM_GITHUB_TOKEN=<github-token>
+bin/kadmctl publish-release-console --tag <image-tag> --apply
 
-export ONECD_GITHUB_TOKEN=<new-token>
+export KADM_GITHUB_TOKEN=<new-token>
+export KADM_GHCR_USERNAME=<github-user>
+export KADM_GHCR_TOKEN=<ghcr-token>
 
 bin/kadmctl configure-delivery home-prod --apply
 ```
 
-`publish-onecd` runs `npm test`, `npm run lint`, `docker build`, `docker push`, and updates the prod overlay image tag. `configure-delivery` reads secrets from environment variables, generates an Argo CD session token when `ONECD_ARGOCD_TOKEN` is not provided, applies Kubernetes Secrets through transient local manifests so failed API calls can be retried, configures Argo CD repository credentials for the current repositories, includes the K3s join token from the local bootstrap profile, and deploys the KADM release console Kustomize overlay. Do not pass tokens as command-line arguments.
+`publish-release-console` triggers the `kadm-release-console` GitHub Actions workflow, waits for it to finish, and fast-forwards the local repo so the overlay tag matches the build output. `configure-delivery` reads secrets from environment variables, generates an Argo CD session token when `KADM_ARGOCD_TOKEN` is not provided, applies Kubernetes Secrets through transient local manifests so failed API calls can be retried, configures Argo CD repository credentials for the current repositories, includes the K3s join token from the local bootstrap profile, and deploys the KADM release console Kustomize overlay. `KADM_*` environment variables are the preferred interface; `ONECD_*` names remain supported as compatibility aliases. Do not pass tokens as command-line arguments.
 
 Access the platform through an SSH tunnel instead of exposing the Kubernetes API publicly:
 

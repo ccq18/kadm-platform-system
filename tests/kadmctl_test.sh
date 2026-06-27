@@ -694,9 +694,10 @@ STUB
   fi
 }
 
-test_publish_onecd_dry_run_prints_scripted_image_plan() {
-  local tmp_onecd
+test_publish_release_console_dry_run_prints_ci_plan() {
+  local tmp_onecd tmp_bin
   tmp_onecd="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
   mkdir -p "${tmp_onecd}/k8s/overlays/prod"
   cat > "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -707,22 +708,36 @@ images:
   newTag: old
 YAML
 
-  local output
-  output="$("${KADMCTL}" publish-onecd --onecd-dir "${tmp_onecd}" --tag test-123 --dry-run)"
+  cat > "${tmp_bin}/git" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-C" ]]; then
+  shift 2
+fi
+if [[ "${1:-}" == "config" ]]; then
+  printf 'git@github.com:ccq18/kadm-release-console.git\n'
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/git"
 
-  assert_contains "${output}" "DRY RUN: KADM release console image will not be built or pushed"
-  assert_contains "${output}" "onecd dir: ${tmp_onecd}"
+  local output
+  output="$(PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-release-console --repo-dir "${tmp_onecd}" --tag test-123 --dry-run)"
+
+  assert_contains "${output}" "DRY RUN: KADM release console release will not be triggered"
+  assert_contains "${output}" "repo dir: ${tmp_onecd}"
   assert_contains "${output}" "image: ghcr.io/ccq18/kadm-release-console:test-123"
-  assert_contains "${output}" "platform: linux/amd64"
+  assert_contains "${output}" "workflow: build-and-publish.yaml"
+  assert_contains "${output}" "ref: main"
   assert_contains "${output}" "updates overlay: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
 }
 
-test_publish_onecd_apply_uses_password_stdin_and_updates_overlay_tag() {
-  local tmp_onecd tmp_bin calls_file stdin_file
+test_publish_release_console_apply_triggers_github_actions_and_pulls_overlay() {
+  local tmp_onecd tmp_bin calls_file gh_state_file
   tmp_onecd="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_onecd}/calls.log"
-  stdin_file="${tmp_onecd}/stdin.log"
+  gh_state_file="${tmp_onecd}/gh-state"
   mkdir -p "${tmp_onecd}/k8s/overlays/prod"
   cat > "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -735,38 +750,149 @@ images:
   newTag: old
 YAML
 
-  cat > "${tmp_bin}/npm" <<'STUB'
+  cat > "${tmp_bin}/git" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'npm %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+printf 'git %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "${1:-}" == "-C" ]]; then
+  shift 2
+fi
+case "${1:-}" in
+  config)
+    printf 'git@github.com:ccq18/kadm-release-console.git\n'
+    ;;
+  diff)
+    exit 0
+    ;;
+  ls-files)
+    exit 0
+    ;;
+  fetch)
+    exit 0
+    ;;
+  rev-parse)
+    if [[ "${2:-}" == "HEAD" || "${2:-}" == "FETCH_HEAD" ]]; then
+      printf 'abc1234\n'
+    fi
+    ;;
+  pull)
+    exit 0
+    ;;
+esac
 exit 0
 STUB
-  cat > "${tmp_bin}/docker" <<'STUB'
+  cat > "${tmp_bin}/gh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'docker %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
-if [[ "${1:-}" == "login" ]]; then
-  cat >> "${ONECDCTL_TEST_STDIN}"
+printf 'gh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+case "${1:-}" in
+  workflow)
+    printf 'run queued\n'
+    printf 'new\n' > "${ONECDCTL_TEST_GH_STATE}"
+    ;;
+  run)
+    if [[ "${2:-}" == "list" ]]; then
+      if [[ -f "${ONECDCTL_TEST_GH_STATE}" ]]; then
+        printf '12345\n'
+      fi
+      exit 0
+    fi
+    if [[ "${2:-}" == "watch" ]]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 0
+STUB
+  chmod +x "${tmp_bin}/git" "${tmp_bin}/gh"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_GH_STATE="${gh_state_file}" PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-release-console --repo-dir "${tmp_onecd}" --tag test-123 --apply)"
+
+  assert_contains "${output}" "triggered KADM release console workflow run: 12345"
+  assert_contains "${output}" "updated overlay from git: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
+  assert_file_contains "${calls_file}" "git -C ${tmp_onecd} config --get remote.origin.url"
+  assert_file_contains "${calls_file}" "git -C ${tmp_onecd} fetch origin main --quiet"
+  assert_file_contains "${calls_file}" "gh workflow run build-and-publish.yaml --repo ccq18/kadm-release-console --ref main -f image_tag=test-123"
+  assert_file_contains "${calls_file}" "gh run watch 12345 --repo ccq18/kadm-release-console --exit-status"
+  assert_file_contains "${calls_file}" "git -C ${tmp_onecd} pull --ff-only origin main"
+}
+
+test_publish_release_console_rejects_dirty_repo() {
+  local tmp_onecd tmp_bin calls_file
+  tmp_onecd="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_onecd}/calls.log"
+  mkdir -p "${tmp_onecd}/k8s/overlays/prod"
+  cat > "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/kadm-release-console
+  newName: ghcr.io/ccq18/kadm-release-console
+  newTag: old
+YAML
+
+  cat > "${tmp_bin}/git" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'git %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "${1:-}" == "-C" ]]; then
+  shift 2
+fi
+case "${1:-}" in
+  config)
+    printf 'git@github.com:ccq18/kadm-release-console.git\n'
+    ;;
+  diff)
+    exit 1
+    ;;
+esac
+exit 0
+STUB
+  chmod +x "${tmp_bin}/git"
+
+  local output status
+  set +e
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-release-console --repo-dir "${tmp_onecd}" --tag test-123 --apply 2>&1)"
+  status="$?"
+  set -e
+
+  [[ "${status}" -ne 0 ]] || fail "dirty repo was accepted"
+  assert_contains "${output}" "release console repo has uncommitted changes"
+}
+
+test_publish_onecd_alias_still_works() {
+  local tmp_onecd tmp_bin
+  tmp_onecd="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  mkdir -p "${tmp_onecd}/k8s/overlays/prod"
+  cat > "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/kadm-release-console
+  newName: ghcr.io/ccq18/kadm-release-console
+  newTag: old
+YAML
+
+  cat > "${tmp_bin}/git" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-C" ]]; then
+  shift 2
+fi
+if [[ "${1:-}" == "config" ]]; then
+  printf 'git@github.com:ccq18/kadm-release-console.git\n'
 fi
 exit 0
 STUB
-  chmod +x "${tmp_bin}/npm" "${tmp_bin}/docker"
+  chmod +x "${tmp_bin}/git"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" publish-onecd --onecd-dir "${tmp_onecd}" --tag test-123 --apply)"
+  output="$(PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-onecd --onecd-dir "${tmp_onecd}" --tag test-123 --dry-run)"
 
-  assert_contains "${output}" "published KADM release console image: ghcr.io/ccq18/kadm-release-console:test-123"
-  assert_file_contains "${calls_file}" "npm test"
-  assert_file_contains "${calls_file}" "npm run lint"
-  assert_file_contains "${calls_file}" "docker info"
-  assert_file_contains "${calls_file}" "docker login ghcr.io -u ccq18 --password-stdin"
-  assert_file_contains "${calls_file}" "docker build --platform linux/amd64 -t ghcr.io/ccq18/kadm-release-console:test-123 ${tmp_onecd}"
-  assert_file_contains "${calls_file}" "docker push ghcr.io/ccq18/kadm-release-console:test-123"
-  assert_file_contains "${stdin_file}" "ghcr-token"
-  assert_file_contains "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" "  newTag: test-123"
-  if grep -Fq "ghcr-token" "${calls_file}"; then
-    fail "GHCR token leaked into command arguments"
-  fi
+  assert_contains "${output}" "DRY RUN: KADM release console release will not be triggered"
 }
 
 test_install_tools_dry_run_is_script_managed() {
@@ -980,8 +1106,10 @@ test_status_uses_profile_and_api_tunnel
 test_bootstrap_rejects_unsafe_profile_values
 test_configure_delivery_dry_run_describes_required_inputs
 test_configure_delivery_apply_creates_secrets_without_token_in_arguments
-test_publish_onecd_dry_run_prints_scripted_image_plan
-test_publish_onecd_apply_uses_password_stdin_and_updates_overlay_tag
+test_publish_release_console_dry_run_prints_ci_plan
+test_publish_release_console_apply_triggers_github_actions_and_pulls_overlay
+test_publish_release_console_rejects_dirty_repo
+test_publish_onecd_alias_still_works
 test_install_tools_dry_run_is_script_managed
 test_prepare_assets_dry_run_prints_pinned_assets
 test_prepare_assets_apply_downloads_pinned_assets

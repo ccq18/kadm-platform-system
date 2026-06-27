@@ -36,7 +36,8 @@ Usage:
   kadmctl prepare-assets [--refresh] [--dry-run|--apply]
   kadmctl export-assets --output <path>
   kadmctl import-assets <path>
-  kadmctl publish-onecd [--onecd-dir <path>] [--image <repo>] [--tag <tag>] [--skip-tests] [--dry-run|--apply]
+  kadmctl publish-release-console [--repo-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
+  kadmctl publish-onecd [--onecd-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
   kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--dry-run|--apply]
   kadmctl connect [cluster] [--api-port <port>] [--console-port <port>] [--dry-run]
   kadmctl status [cluster] [--api-port <port>]
@@ -49,7 +50,7 @@ Examples:
   kadmctl prepare-assets --apply
   kadmctl export-assets --output kadm-platform-assets.tgz
   kadmctl import-assets kadm-platform-assets.tgz
-  KADM_GHCR_USERNAME=... KADM_GHCR_TOKEN=... kadmctl publish-onecd --tag sha-1234567 --apply
+  KADM_GITHUB_TOKEN=... kadmctl publish-release-console --tag sha-1234567 --apply
   KADM_GITHUB_TOKEN=... kadmctl configure-delivery home-prod --apply
   kadmctl connect home-prod
   kadmctl status home-prod
@@ -82,6 +83,13 @@ require_env() {
   [[ -n "${!name:-}" ]] || die "${name} is required"
 }
 
+apply_kadm_env_aliases() {
+  [[ -n "${ONECD_GITHUB_TOKEN:-}" || -z "${KADM_GITHUB_TOKEN:-}" ]] || export ONECD_GITHUB_TOKEN="${KADM_GITHUB_TOKEN}"
+  [[ -n "${ONECD_GHCR_USERNAME:-}" || -z "${KADM_GHCR_USERNAME:-}" ]] || export ONECD_GHCR_USERNAME="${KADM_GHCR_USERNAME}"
+  [[ -n "${ONECD_GHCR_TOKEN:-}" || -z "${KADM_GHCR_TOKEN:-}" ]] || export ONECD_GHCR_TOKEN="${KADM_GHCR_TOKEN}"
+  [[ -n "${ONECD_ARGOCD_TOKEN:-}" || -z "${KADM_ARGOCD_TOKEN:-}" ]] || export ONECD_ARGOCD_TOKEN="${KADM_ARGOCD_TOKEN}"
+}
+
 retry_command() {
   local attempts="$1"
   local delay="$2"
@@ -112,6 +120,11 @@ validate_image_repo() {
 validate_image_tag() {
   local value="$1"
   [[ "${value}" =~ ^[A-Za-z0-9._-]+$ ]] || die "image tag must contain only letters, numbers, dot, underscore, or dash"
+}
+
+validate_git_ref() {
+  local value="$1"
+  [[ "${value}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "git ref contains unsupported characters"
 }
 
 validate_port() {
@@ -1069,6 +1082,87 @@ default_onecd_image_tag() {
   fi
 }
 
+git_remote_repo_slug() {
+  local repo_dir="$1"
+  local url path
+  url="$(git -C "${repo_dir}" config --get remote.origin.url)"
+  case "${url}" in
+    git@github.com:*)
+      path="${url#git@github.com:}"
+      ;;
+    https://github.com/*)
+      path="${url#https://github.com/}"
+      ;;
+    *)
+      die "unsupported origin url for release console repo: ${url}"
+      ;;
+  esac
+  path="${path%.git}"
+  printf '%s\n' "${path}"
+}
+
+require_clean_git_worktree() {
+  local repo_dir="$1"
+  git -C "${repo_dir}" diff --quiet || die "release console repo has uncommitted changes"
+  git -C "${repo_dir}" diff --cached --quiet || die "release console repo has uncommitted changes"
+  [[ -z "$(git -C "${repo_dir}" ls-files --others --exclude-standard)" ]] || die "release console repo has uncommitted changes"
+}
+
+require_release_ref_synced() {
+  local repo_dir="$1"
+  local ref="$2"
+  local local_head remote_head
+  git -C "${repo_dir}" fetch origin "${ref}" --quiet
+  local_head="$(git -C "${repo_dir}" rev-parse HEAD)"
+  remote_head="$(git -C "${repo_dir}" rev-parse FETCH_HEAD)"
+  [[ "${local_head}" == "${remote_head}" ]] || die "release console repo HEAD does not match origin/${ref}; push or pull first"
+}
+
+gh_cmd() {
+  if [[ -n "${KADM_GITHUB_TOKEN:-}" ]]; then
+    GH_TOKEN="${KADM_GITHUB_TOKEN}" gh "$@"
+    return
+  fi
+  gh "$@"
+}
+
+list_workflow_run_ids() {
+  local repo_slug="$1"
+  local workflow="$2"
+  local ref="$3"
+  gh_cmd run list \
+    --repo "${repo_slug}" \
+    --workflow "${workflow}" \
+    --branch "${ref}" \
+    --event workflow_dispatch \
+    --json databaseId \
+    --jq '.[].databaseId'
+}
+
+wait_for_new_workflow_run_id() {
+  local repo_slug="$1"
+  local workflow="$2"
+  local ref="$3"
+  local before_file="$4"
+  local attempt run_id
+
+  for ((attempt = 1; attempt <= 40; attempt++)); do
+    run_id="$(
+      list_workflow_run_ids "${repo_slug}" "${workflow}" "${ref}" 2>/dev/null |
+        grep -E '^[0-9]+$' |
+        grep -Fvx -f "${before_file}" |
+        head -n 1 || true
+    )"
+    if [[ -n "${run_id}" ]]; then
+      printf '%s\n' "${run_id}"
+      return 0
+    fi
+    sleep 3
+  done
+
+  die "timed out waiting for GitHub Actions workflow run to appear"
+}
+
 update_overlay_image_tag() {
   local overlay_file="$1"
   local tag="$2"
@@ -1096,35 +1190,36 @@ update_overlay_image_tag() {
   rm -f "${tmp}"
 }
 
-cmd_publish_onecd() {
-  local onecd_dir="${DEFAULT_ONECD_OVERLAY%/k8s/overlays/prod}"
+cmd_publish_release_console() {
+  apply_kadm_env_aliases
+  local repo_dir="${DEFAULT_ONECD_OVERLAY%/k8s/overlays/prod}"
   local image="ghcr.io/ccq18/kadm-release-console"
   local tag=""
-  local platform="linux/amd64"
-  local skip_tests=0
+  local ref="main"
+  local workflow="build-and-publish.yaml"
   local apply=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --onecd-dir)
-        onecd_dir="${2:-}"
+      --repo-dir)
+        repo_dir="${2:-}"
         shift 2
         ;;
-      --image)
-        image="${2:-}"
+      --onecd-dir)
+        repo_dir="${2:-}"
         shift 2
         ;;
       --tag)
         tag="${2:-}"
         shift 2
         ;;
-      --platform)
-        platform="${2:-}"
+      --ref)
+        ref="${2:-}"
         shift 2
         ;;
-      --skip-tests)
-        skip_tests=1
-        shift
+      --workflow)
+        workflow="${2:-}"
+        shift 2
         ;;
       --apply)
         apply=1
@@ -1139,51 +1234,50 @@ cmd_publish_onecd() {
         return 0
         ;;
       *)
-        die "unknown publish-onecd option: $1"
+        die "unknown publish-release-console option: $1"
         ;;
     esac
   done
 
-  [[ -d "${onecd_dir}" ]] || die "KADM release console directory not found: ${onecd_dir}"
-  local overlay_file="${onecd_dir}/k8s/overlays/prod/kustomization.yaml"
+  [[ -d "${repo_dir}" ]] || die "KADM release console directory not found: ${repo_dir}"
+  local overlay_file="${repo_dir}/k8s/overlays/prod/kustomization.yaml"
   [[ -f "${overlay_file}" ]] || die "KADM release console prod overlay not found: ${overlay_file}"
 
-  tag="${tag:-$(default_onecd_image_tag "${onecd_dir}")}"
+  tag="${tag:-$(default_onecd_image_tag "${repo_dir}")}"
   validate_image_repo "${image}"
   validate_image_tag "${tag}"
+  validate_git_ref "${ref}"
+  local repo_slug
+  repo_slug="$(git_remote_repo_slug "${repo_dir}")"
 
   if [[ "${apply}" -ne 1 ]]; then
-    info "DRY RUN: KADM release console image will not be built or pushed"
-    info "onecd dir: ${onecd_dir}"
+    info "DRY RUN: KADM release console release will not be triggered"
+    info "repo dir: ${repo_dir}"
+    info "repo: ${repo_slug}"
     info "image: ${image}:${tag}"
-    if [[ "${skip_tests}" -eq 1 ]]; then
-      info "tests: skipped"
-    else
-      info "tests: npm test && npm run lint"
-    fi
-    info "platform: ${platform}"
-    info "push: docker push ${image}:${tag}"
+    info "workflow: ${workflow}"
+    info "ref: ${ref}"
     info "updates overlay: ${overlay_file}"
     return 0
   fi
 
-  require_command npm
-  require_command docker
-  require_env ONECD_GHCR_USERNAME
-  require_env ONECD_GHCR_TOKEN
+  require_command git
+  require_command gh
+  require_clean_git_worktree "${repo_dir}"
+  require_release_ref_synced "${repo_dir}" "${ref}"
 
-  if [[ "${skip_tests}" -ne 1 ]]; then
-    (cd "${onecd_dir}" && npm test && npm run lint)
-  fi
+  local before_file run_id
+  before_file="$(mktemp)"
+  list_workflow_run_ids "${repo_slug}" "${workflow}" "${ref}" > "${before_file}" || true
 
-  docker info >/dev/null
-  printf '%s' "${ONECD_GHCR_TOKEN}" | docker login ghcr.io -u "${ONECD_GHCR_USERNAME}" --password-stdin
-  docker build --platform "${platform}" -t "${image}:${tag}" "${onecd_dir}"
-  docker push "${image}:${tag}"
-  update_overlay_image_tag "${overlay_file}" "${tag}"
+  gh_cmd workflow run "${workflow}" --repo "${repo_slug}" --ref "${ref}" -f "image_tag=${tag}" >/dev/null
+  run_id="$(wait_for_new_workflow_run_id "${repo_slug}" "${workflow}" "${ref}" "${before_file}")"
+  rm -f "${before_file}"
+  info "triggered KADM release console workflow run: ${run_id}"
+  gh_cmd run watch "${run_id}" --repo "${repo_slug}" --exit-status
+  git -C "${repo_dir}" pull --ff-only origin "${ref}"
 
-  info "published KADM release console image: ${image}:${tag}"
-  info "updated overlay: ${overlay_file}"
+  info "updated overlay from git: ${overlay_file}"
 }
 
 emit_onecd_secret_yaml() {
@@ -1431,6 +1525,7 @@ cmd_bootstrap() {
 }
 
 cmd_configure_delivery() {
+  apply_kadm_env_aliases
   local cluster="${DEFAULT_CLUSTER}"
   local onecd_overlay="${DEFAULT_ONECD_OVERLAY}"
   local argocd_base_url="http://argocd-server.argocd.svc.cluster.local"
@@ -1778,8 +1873,11 @@ main() {
     import-assets)
       cmd_import_assets "$@"
       ;;
+    publish-release-console)
+      cmd_publish_release_console "$@"
+      ;;
     publish-onecd)
-      cmd_publish_onecd "$@"
+      cmd_publish_release_console "$@"
       ;;
     configure-delivery)
       cmd_configure_delivery "$@"
