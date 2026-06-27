@@ -946,6 +946,27 @@ ssh_host_part() {
   echo "${without_user%%:*}"
 }
 
+local_ipv4_addresses() {
+  if command -v ip >/dev/null 2>&1; then
+    ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+    return 0
+  fi
+  hostname -I 2>/dev/null | tr ' ' '\n'
+}
+
+is_local_ssh_target() {
+  local ssh_target="$1"
+  local host
+  host="$(ssh_host_part "${ssh_target}")"
+  [[ "${host}" == "localhost" || "${host}" == "127.0.0.1" ]] && return 0
+  local ip
+  while read -r ip; do
+    [[ -n "${ip}" ]] || continue
+    [[ "${host}" == "${ip}" ]] && return 0
+  done < <(local_ipv4_addresses)
+  return 1
+}
+
 kubectl_for() {
   local kubeconfig_path="$1"
   shift
@@ -2178,7 +2199,6 @@ cmd_configure_delivery() {
     return 0
   fi
 
-  require_command ssh
   require_command kubectl
   require_env ONECD_GITHUB_TOKEN
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
@@ -2191,9 +2211,15 @@ cmd_configure_delivery() {
     require_env ONECD_GHCR_TOKEN
   fi
 
-  info "Starting temporary Kubernetes API tunnel for delivery configuration"
   local tunnel_pid
-  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  if is_local_ssh_target "${MASTER_SSH}"; then
+    info "Using local Kubernetes API access for delivery configuration"
+    tunnel_pid=""
+  else
+    require_command ssh
+    info "Starting temporary Kubernetes API tunnel for delivery configuration"
+    tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  fi
   wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
 
   local argocd_token="${ONECD_ARGOCD_TOKEN:-}"
@@ -2413,13 +2439,18 @@ cmd_status() {
   local api_port="${api_port_override:-${API_LOCAL_PORT}}"
   validate_port "${api_port}"
 
-  require_command ssh
   require_command kubectl
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
   info "Cluster status: ${CLUSTER_NAME}"
   local tunnel_pid
-  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${api_port}")"
+  if is_local_ssh_target "${MASTER_SSH}"; then
+    info "Using local Kubernetes API access"
+    tunnel_pid=""
+  else
+    require_command ssh
+    tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${api_port}")"
+  fi
   wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
 
   local status=0
@@ -2492,12 +2523,17 @@ cmd_cleanup_legacy_onecd() {
     return 0
   fi
 
-  require_command ssh
   require_command kubectl
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
   local tunnel_pid
-  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${api_port}")"
+  if is_local_ssh_target "${MASTER_SSH}"; then
+    info "Using local Kubernetes API access"
+    tunnel_pid=""
+  else
+    require_command ssh
+    tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${api_port}")"
+  fi
   wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
 
   kubectl_retry "${KUBECONFIG_PATH}" -n argocd delete application onecd --ignore-not-found
@@ -2593,12 +2629,17 @@ cmd_configure_demo_apps() {
     return 0
   fi
 
-  require_command ssh
   require_command kubectl
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
   local tunnel_pid
-  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  if is_local_ssh_target "${MASTER_SSH}"; then
+    info "Using local Kubernetes API access"
+    tunnel_pid=""
+  else
+    require_command ssh
+    tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  fi
   wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
 
   create_namespace_if_missing "${KUBECONFIG_PATH}" apps
@@ -2683,12 +2724,17 @@ cmd_configure_cluster_dns() {
     return 0
   fi
 
-  require_command ssh
   require_command kubectl
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
   local tunnel_pid
-  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  if is_local_ssh_target "${MASTER_SSH}"; then
+    info "Using local Kubernetes API access"
+    tunnel_pid=""
+  else
+    require_command ssh
+    tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  fi
   wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
 
   apply_cluster_dns_upstreams "${KUBECONFIG_PATH}" "$(current_coredns_nodehosts "${KUBECONFIG_PATH}")" "${upstreams[@]}"
