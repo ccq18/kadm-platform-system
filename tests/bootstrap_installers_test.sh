@@ -91,6 +91,9 @@ while [[ \$# -gt 0 ]]; do
   esac
 done
 case "\${url}" in
+  *"/commits/"*)
+    printf '{\n  "sha": "1111111111111111111111111111111111111111"\n}\n'
+    ;;
   *"/kadm-platform-system/"*)
     cp "${archives_dir}/kadm-platform-system.tgz" "\${output}"
     ;;
@@ -183,6 +186,9 @@ while [[ \$# -gt 0 ]]; do
   esac
 done
 case "\${url}" in
+  *"/commits/"*)
+    printf '{\n  "sha": "1111111111111111111111111111111111111111"\n}\n'
+    ;;
   *"/kadm-platform-system/"*)
     cp "${archives_dir}/kadm-platform-system.tgz" "\${output}"
     ;;

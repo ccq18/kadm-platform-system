@@ -121,11 +121,13 @@ download_repo_archive() {
   local repo="$1"
   local ref="$2"
   local target_dir="$3"
-  local archive tmp_extract extracted_dir
+  local archive tmp_extract extracted_dir resolved_sha
+
+  resolved_sha="$(resolve_repo_ref_sha "${repo}" "${ref}")"
 
   archive="$(mktemp)"
   tmp_extract="$(mktemp -d)"
-  download_url "https://api.github.com/repos/${github_owner}/${repo}/tarball/${ref}" "${archive}"
+  download_url "https://api.github.com/repos/${github_owner}/${repo}/tarball/${resolved_sha}" "${archive}"
   tar -xzf "${archive}" -C "${tmp_extract}"
   extracted_dir="$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
   [[ -n "${extracted_dir}" ]] || die "failed to extract ${repo}@${ref}"
@@ -134,6 +136,32 @@ download_repo_archive() {
   mkdir -p "$(dirname "${target_dir}")"
   mv "${extracted_dir}" "${target_dir}"
   rm -rf "${tmp_extract}" "${archive}"
+}
+
+resolve_repo_ref_sha() {
+  local repo="$1"
+  local ref="$2"
+  local response sha curl_args
+  curl_args=(
+    --http1.1
+    -fsSL
+    --retry 5
+    --retry-delay 3
+    --connect-timeout 30
+    --max-time 120
+  )
+
+  if [[ -n "${KADM_GITHUB_TOKEN:-}" ]]; then
+    curl_args+=(
+      -H "Authorization: Bearer ${KADM_GITHUB_TOKEN}"
+      -H "X-GitHub-Api-Version: 2022-11-28"
+    )
+  fi
+
+  response="$(curl "${curl_args[@]}" "https://api.github.com/repos/${github_owner}/${repo}/commits/${ref}")"
+  sha="$(printf '%s\n' "${response}" | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
+  [[ -n "${sha}" ]] || die "failed to resolve ${repo}@${ref} to a commit sha"
+  printf '%s\n' "${sha}"
 }
 
 ensure_workspace() {
