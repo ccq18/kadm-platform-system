@@ -1,0 +1,1802 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_CLUSTER="default"
+DEFAULT_API_PORT="16443"
+DEFAULT_CONSOLE_PORT="18080"
+DEFAULT_ARGOCD_LOCAL_PORT="18081"
+DEFAULT_K3S_VERSION=""
+DEFAULT_GATEWAY_API_VERSION="v1.5.1"
+DEFAULT_ARGOCD_VERSION="v3.4.4"
+DEFAULT_ROLLOUTS_VERSION="v1.9.0"
+DEFAULT_CILIUM_VERSION="1.19.5"
+KUBECTL_REQUEST_TIMEOUT="${ONECD_KUBECTL_REQUEST_TIMEOUT:-30s}"
+KUBECTL_RETRY_ATTEMPTS="${ONECD_KUBECTL_RETRY_ATTEMPTS:-5}"
+KUBECTL_RETRY_DELAY="${ONECD_KUBECTL_RETRY_DELAY:-5}"
+DEFAULT_GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/download/${DEFAULT_GATEWAY_API_VERSION}/experimental-install.yaml"
+DEFAULT_ARGOCD_URL="https://raw.githubusercontent.com/argoproj/argo-cd/${DEFAULT_ARGOCD_VERSION}/manifests/install.yaml"
+DEFAULT_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/download/${DEFAULT_ROLLOUTS_VERSION}/install.yaml"
+DEFAULT_CILIUM_CHART_URL="https://helm.cilium.io/cilium-${DEFAULT_CILIUM_VERSION}.tgz"
+LEGACY_GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/experimental-install.yaml"
+LEGACY_ARGOCD_URL="https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
+LEGACY_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_PARENT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+DEFAULT_ONECD_OVERLAY="${WORKSPACE_PARENT}/kadm-release-console/k8s/overlays/prod"
+DEFAULT_HELM_VERSION="v3.15.4"
+HELM_BIN=""
+
+usage() {
+  cat <<'USAGE'
+kadmctl - local installer and connector for the KADM platform
+
+Usage:
+  kadmctl bootstrap <ssh-target> [--name <cluster>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--cilium-version <version>] [--skip-components] [--dry-run|--apply]
+  kadmctl install-tools [--dry-run|--apply]
+  kadmctl prepare-assets [--refresh] [--dry-run|--apply]
+  kadmctl export-assets --output <path>
+  kadmctl import-assets <path>
+  kadmctl publish-onecd [--onecd-dir <path>] [--image <repo>] [--tag <tag>] [--skip-tests] [--dry-run|--apply]
+  kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--dry-run|--apply]
+  kadmctl connect [cluster] [--api-port <port>] [--console-port <port>] [--dry-run]
+  kadmctl status [cluster] [--api-port <port>]
+  kadmctl reset-node <ssh-target> [--dry-run|--apply]
+  kadmctl help
+
+Examples:
+  kadmctl bootstrap root@1.2.3.4 --name home-prod --private-ip 10.0.0.11 --apply
+  kadmctl install-tools --apply
+  kadmctl prepare-assets --apply
+  kadmctl export-assets --output kadm-platform-assets.tgz
+  kadmctl import-assets kadm-platform-assets.tgz
+  KADM_GHCR_USERNAME=... KADM_GHCR_TOKEN=... kadmctl publish-onecd --tag sha-1234567 --apply
+  KADM_GITHUB_TOKEN=... kadmctl configure-delivery home-prod --apply
+  kadmctl connect home-prod
+  kadmctl status home-prod
+  kadmctl reset-node root@1.2.3.4 --apply
+  kadmctl connect --dry-run
+
+Safety:
+  bootstrap defaults to --dry-run. Remote changes require --apply.
+  bootstrap consumes cached component assets. Run prepare-assets before bootstrap.
+  reset-node defaults to --dry-run. Remote cleanup requires --apply.
+  connect uses SSH tunnel by default; Kubernetes API does not need public exposure.
+USAGE
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+info() {
+  echo "$*"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+require_env() {
+  local name="$1"
+  [[ -n "${!name:-}" ]] || die "${name} is required"
+}
+
+retry_command() {
+  local attempts="$1"
+  local delay="$2"
+  shift 2
+
+  local i
+  for ((i = 1; i <= attempts; i++)); do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "${i}" -eq "${attempts}" ]]; then
+      return 1
+    fi
+    sleep "${delay}"
+  done
+}
+
+validate_cluster_name() {
+  local value="$1"
+  [[ "${value}" =~ ^[A-Za-z0-9._-]+$ ]] || die "cluster name must contain only letters, numbers, dot, underscore, or dash"
+}
+
+validate_image_repo() {
+  local value="$1"
+  [[ "${value}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "image repo must contain only letters, numbers, dot, underscore, slash, or dash"
+}
+
+validate_image_tag() {
+  local value="$1"
+  [[ "${value}" =~ ^[A-Za-z0-9._-]+$ ]] || die "image tag must contain only letters, numbers, dot, underscore, or dash"
+}
+
+validate_port() {
+  local value="$1"
+  [[ "${value}" =~ ^[0-9]+$ ]] || die "port must be numeric: ${value}"
+  (( value >= 1 && value <= 65535 )) || die "port out of range: ${value}"
+}
+
+validate_ssh_target() {
+  local value="$1"
+  [[ "${value}" =~ ^[A-Za-z0-9._~@:%+-]+$ ]] || die "ssh target contains unsupported characters"
+}
+
+validate_optional_machine_value() {
+  local label="$1"
+  local value="$2"
+  [[ -z "${value}" || "${value}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "${label} contains unsupported characters"
+}
+
+tool_dir() {
+  echo "${HOME}/.onecd/bin"
+}
+
+cache_dir() {
+  echo "${HOME}/.onecd/cache"
+}
+
+manifest_cache_dir() {
+  echo "$(cache_dir)/manifests"
+}
+
+chart_cache_dir() {
+  echo "$(cache_dir)/charts"
+}
+
+cilium_chart_path() {
+  local version="$1"
+  echo "$(chart_cache_dir)/cilium-${version}.tgz"
+}
+
+detect_platform() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "${os}:${arch}" in
+    Darwin:arm64) echo "darwin-arm64" ;;
+    Darwin:x86_64) echo "darwin-amd64" ;;
+    Linux:x86_64) echo "linux-amd64" ;;
+    Linux:aarch64|Linux:arm64) echo "linux-arm64" ;;
+    *) die "unsupported local platform for tool install: ${os}/${arch}" ;;
+  esac
+}
+
+cmd_install_tools() {
+  local apply=0
+  local helm_version="${DEFAULT_HELM_VERSION}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --helm-version)
+        helm_version="${2:-}"
+        shift 2
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        die "unknown install-tools option: $1"
+        ;;
+    esac
+  done
+
+  local dir platform
+  dir="$(tool_dir)"
+  platform="$(detect_platform)"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: local tools will not be installed"
+    info "tool: helm ${helm_version}"
+    info "platform: ${platform}"
+    info "target dir: ${dir}"
+    return 0
+  fi
+
+  install_helm "${helm_version}" "${platform}" "${dir}"
+}
+
+cmd_reset_node() {
+  local ssh_target=""
+  local apply=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown reset-node option: $1"
+        ;;
+      *)
+        if [[ -n "${ssh_target}" ]]; then
+          die "unexpected reset-node argument: $1"
+        fi
+        ssh_target="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "${ssh_target}" ]] || die "reset-node requires an ssh target, for example root@1.2.3.4"
+  validate_ssh_target "${ssh_target}"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: no remote cleanup will be made"
+    info "target: ${ssh_target}"
+    info "removes: K3s server/agent services and data directories"
+    return 0
+  fi
+
+  require_command ssh
+  info "Resetting node ${ssh_target}"
+  ssh "${ssh_target}" sudo sh -s <<'REMOTE'
+set -eu
+
+if command -v k3s-uninstall.sh >/dev/null 2>&1; then
+  k3s-uninstall.sh || true
+fi
+
+if command -v k3s-agent-uninstall.sh >/dev/null 2>&1; then
+  k3s-agent-uninstall.sh || true
+fi
+
+systemctl stop k3s >/dev/null 2>&1 || true
+systemctl stop k3s-agent >/dev/null 2>&1 || true
+systemctl disable k3s >/dev/null 2>&1 || true
+systemctl disable k3s-agent >/dev/null 2>&1 || true
+
+rm -rf \
+  /etc/rancher/k3s \
+  /var/lib/rancher/k3s \
+  /var/lib/kubelet \
+  /var/lib/cni \
+  /etc/cni/net.d \
+  /opt/cni/bin \
+  /run/flannel \
+  /var/run/flannel
+REMOTE
+  info "node reset completed"
+}
+
+cmd_prepare_assets() {
+  local apply=0
+  local refresh=0
+  local gateway_api_url="${DEFAULT_GATEWAY_API_URL}"
+  local argocd_url="${DEFAULT_ARGOCD_URL}"
+  local rollouts_url="${DEFAULT_ROLLOUTS_URL}"
+  local cilium_version="${DEFAULT_CILIUM_VERSION}"
+  local cilium_chart_url="${DEFAULT_CILIUM_CHART_URL}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --refresh)
+        refresh=1
+        shift
+        ;;
+      --gateway-api-url)
+        gateway_api_url="${2:-}"
+        shift 2
+        ;;
+      --argocd-url)
+        argocd_url="${2:-}"
+        shift 2
+        ;;
+      --rollouts-url)
+        rollouts_url="${2:-}"
+        shift 2
+        ;;
+      --cilium-version)
+        cilium_version="${2:-}"
+        cilium_chart_url="https://helm.cilium.io/cilium-${cilium_version}.tgz"
+        shift 2
+        ;;
+      --cilium-chart-url)
+        cilium_chart_url="${2:-}"
+        shift 2
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        die "unknown prepare-assets option: $1"
+        ;;
+    esac
+  done
+
+  validate_optional_machine_value "cilium version" "${cilium_version}"
+
+  local gateway_path argocd_path rollouts_path cilium_chart_path_value
+  gateway_path="$(manifest_cache_path "${gateway_api_url}")"
+  argocd_path="$(manifest_cache_path "${argocd_url}")"
+  rollouts_path="$(manifest_cache_path "${rollouts_url}")"
+  cilium_chart_path_value="$(cilium_chart_path "${cilium_version}")"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: installer assets will not be downloaded"
+    info "Gateway API manifest: ${gateway_api_url}"
+    info "Argo CD manifest: ${argocd_url}"
+    info "Argo Rollouts manifest: ${rollouts_url}"
+    info "Cilium chart: ${cilium_chart_url}"
+    info "cache: ${gateway_path}"
+    info "cache: ${argocd_path}"
+    info "cache: ${rollouts_path}"
+    info "cache: ${cilium_chart_path_value}"
+    return 0
+  fi
+
+  prepare_manifest_asset_with_legacy "${gateway_api_url}" "${refresh}" "Gateway API manifest" "gateway.networking.k8s.io/channel: experimental" "${LEGACY_GATEWAY_API_URL}"
+  prepare_manifest_asset_with_legacy "${argocd_url}" "${refresh}" "Argo CD manifest" "quay.io/argoproj/argocd:${DEFAULT_ARGOCD_VERSION}" "${LEGACY_ARGOCD_URL}"
+  prepare_manifest_asset_with_legacy "${rollouts_url}" "${refresh}" "Argo Rollouts manifest" "quay.io/argoproj/argo-rollouts:${DEFAULT_ROLLOUTS_VERSION}" "${LEGACY_ROLLOUTS_URL}"
+  download_file_to_cache "${cilium_chart_url}" "${cilium_chart_path_value}" "${refresh}" "Cilium chart"
+
+  info "installer assets are ready"
+  info "next: kadmctl bootstrap <ssh-target> --apply"
+}
+
+cmd_export_assets() {
+  local output=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output)
+        output="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        die "unknown export-assets option: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "${output}" ]] || die "export-assets requires --output <path>"
+  require_command tar
+  require_default_assets
+
+  mkdir -p "$(dirname "${output}")"
+  tar -czf "${output}" -C "${HOME}/.onecd" cache
+  chmod 600 "${output}"
+  info "offline asset bundle written: ${output}"
+}
+
+cmd_import_assets() {
+  local archive="${1:-}"
+  [[ -n "${archive}" ]] || die "import-assets requires a bundle path"
+  [[ $# -eq 1 ]] || die "unexpected import-assets arguments"
+  [[ -f "${archive}" ]] || die "offline asset bundle not found: ${archive}"
+  require_command tar
+
+  if ! tar -tzf "${archive}" | grep -Eq '^cache/(manifests|charts)/'; then
+    die "offline asset bundle must contain cache/manifests and cache/charts entries"
+  fi
+
+  mkdir -p "${HOME}/.onecd"
+  tar -xzf "${archive}" -C "${HOME}/.onecd"
+  require_default_assets
+  info "offline asset bundle imported: ${archive}"
+}
+
+install_helm() {
+  local helm_version="$1"
+  local platform="$2"
+  local dir="$3"
+  local target="${dir}/helm"
+
+  require_command curl
+  require_command tar
+  require_command mktemp
+
+  if [[ -x "${target}" ]]; then
+    HELM_BIN="${target}"
+    info "helm already installed: ${target}"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp -d)"
+  mkdir -p "${dir}"
+
+  local archive="${tmp}/helm.tgz"
+  local url="https://get.helm.sh/helm-${helm_version}-${platform}.tar.gz"
+  info "Installing helm ${helm_version} for ${platform} into ${dir}"
+  curl -fsSL "${url}" -o "${archive}"
+  tar -xzf "${archive}" -C "${tmp}"
+  cp "${tmp}/${platform}/helm" "${target}"
+  chmod 700 "${target}"
+  rm -rf "${tmp}"
+  HELM_BIN="${target}"
+}
+
+ensure_helm() {
+  if command -v helm >/dev/null 2>&1; then
+    HELM_BIN="$(command -v helm)"
+    return 0
+  fi
+
+  local bundled
+  bundled="$(tool_dir)/helm"
+  if [[ -x "${bundled}" ]]; then
+    HELM_BIN="${bundled}"
+    return 0
+  fi
+
+  install_helm "${DEFAULT_HELM_VERSION}" "$(detect_platform)" "$(tool_dir)"
+}
+
+is_remote_url() {
+  [[ "$1" == http://* || "$1" == https://* ]]
+}
+
+manifest_cache_path() {
+  local source="$1"
+  local safe
+  safe="$(printf '%s' "${source}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-180)"
+  echo "$(manifest_cache_dir)/${safe}.yaml"
+}
+
+download_manifest_to_cache() {
+  local source="$1"
+  local target="$2"
+  local refresh="${3:-0}"
+  local tmp="${target}.tmp"
+
+  require_command curl
+  mkdir -p "$(dirname "${target}")"
+
+  if [[ "${refresh}" -ne 1 && -s "${target}" ]]; then
+    info "Using cached manifest: ${target}"
+    return 0
+  fi
+
+  if retry_command 5 10 curl --http1.1 -fsSL --connect-timeout 30 --max-time 240 "${source}" -o "${tmp}"; then
+    [[ -s "${tmp}" ]] || die "downloaded manifest is empty: ${source}"
+    mv "${tmp}" "${target}"
+    chmod 600 "${target}"
+    return 0
+  fi
+
+  rm -f "${tmp}"
+  if [[ -s "${target}" ]]; then
+    info "manifest download failed, using cached copy: ${target}"
+    return 0
+  fi
+
+  die "failed to download manifest: ${source}"
+}
+
+materialize_manifest() {
+  local source="$1"
+  local out_var="$2"
+  local path
+
+  if is_remote_url "${source}"; then
+    path="$(manifest_cache_path "${source}")"
+    info "Caching manifest: ${source}"
+    download_manifest_to_cache "${source}" "${path}"
+  else
+    path="${source}"
+    [[ -f "${path}" ]] || die "manifest file not found: ${path}"
+  fi
+
+  printf -v "${out_var}" '%s' "${path}"
+}
+
+prepare_manifest_asset() {
+  local source="$1"
+  local refresh="$2"
+  local path
+  path="$(manifest_cache_path "${source}")"
+  info "Preparing manifest: ${source}"
+  download_manifest_to_cache "${source}" "${path}" "${refresh}"
+}
+
+prepare_manifest_asset_with_legacy() {
+  local source="$1"
+  local refresh="$2"
+  local label="$3"
+  local expected_marker="$4"
+  shift 4
+
+  local target legacy legacy_path
+  target="$(manifest_cache_path "${source}")"
+
+  if [[ "${refresh}" -ne 1 && -s "${target}" ]]; then
+    info "Using cached ${label}: ${target}"
+    return 0
+  fi
+
+  if [[ "${refresh}" -ne 1 ]]; then
+    for legacy in "$@"; do
+      legacy_path="$(manifest_cache_path "${legacy}")"
+      if [[ -s "${legacy_path}" ]] && grep -Fq "${expected_marker}" "${legacy_path}"; then
+        mkdir -p "$(dirname "${target}")"
+        cp "${legacy_path}" "${target}"
+        chmod 600 "${target}"
+        info "Using compatible cached ${label}: ${legacy_path}"
+        return 0
+      fi
+    done
+  fi
+
+  info "Preparing manifest: ${source}"
+  download_manifest_to_cache "${source}" "${target}" "${refresh}"
+}
+
+cached_manifest_asset() {
+  local source="$1"
+  local label="$2"
+  local out_var="$3"
+  local path
+
+  if is_remote_url "${source}"; then
+    path="$(manifest_cache_path "${source}")"
+  else
+    path="${source}"
+  fi
+
+  require_cached_file "${path}" "${label}"
+  info "Using cached ${label}: ${path}"
+  printf -v "${out_var}" '%s' "${path}"
+}
+
+download_file_to_cache() {
+  local source="$1"
+  local target="$2"
+  local refresh="${3:-0}"
+  local label="$4"
+  local tmp="${target}.tmp"
+
+  require_command curl
+  mkdir -p "$(dirname "${target}")"
+
+  if [[ "${refresh}" -ne 1 && -s "${target}" ]]; then
+    info "Using cached ${label}: ${target}"
+    return 0
+  fi
+
+  info "Downloading ${label}: ${source}"
+  if retry_command 5 10 curl --http1.1 -fsSL --connect-timeout 30 --max-time 240 "${source}" -o "${tmp}"; then
+    [[ -s "${tmp}" ]] || die "downloaded ${label} is empty: ${source}"
+    mv "${tmp}" "${target}"
+    chmod 600 "${target}"
+    return 0
+  fi
+
+  rm -f "${tmp}"
+  die "failed to download ${label}: ${source}"
+}
+
+require_cached_file() {
+  local path="$1"
+  local label="$2"
+  [[ -s "${path}" ]] || die "missing cached ${label}: ${path}. Run kadmctl prepare-assets --apply before bootstrap."
+}
+
+require_default_assets() {
+  local gateway_path argocd_path rollouts_path cilium_path
+  gateway_path="$(manifest_cache_path "${DEFAULT_GATEWAY_API_URL}")"
+  argocd_path="$(manifest_cache_path "${DEFAULT_ARGOCD_URL}")"
+  rollouts_path="$(manifest_cache_path "${DEFAULT_ROLLOUTS_URL}")"
+  cilium_path="$(cilium_chart_path "${DEFAULT_CILIUM_VERSION}")"
+
+  require_cached_file "${gateway_path}" "Gateway API manifest"
+  require_cached_file "${argocd_path}" "Argo CD manifest"
+  require_cached_file "${rollouts_path}" "Argo Rollouts manifest"
+  require_cached_file "${cilium_path}" "Cilium chart"
+}
+
+profile_dir() {
+  local cluster="$1"
+  echo "${HOME}/.onecd/clusters/${cluster}"
+}
+
+profile_path() {
+  local cluster="$1"
+  echo "$(profile_dir "${cluster}")/cluster.env"
+}
+
+kubeconfig_path_for() {
+  local cluster="$1"
+  echo "${HOME}/.kube/onecd/${cluster}.yaml"
+}
+
+write_profile() {
+  local cluster="$1"
+  local master_ssh="$2"
+  local private_ip="$3"
+  local kubeconfig_path="$4"
+  local api_port="$5"
+  local console_port="$6"
+  local join_server_url="$7"
+  local join_token="$8"
+
+  mkdir -p "$(profile_dir "${cluster}")"
+  cat > "$(profile_path "${cluster}")" <<PROFILE
+CLUSTER_NAME=${cluster}
+MASTER_SSH=${master_ssh}
+MASTER_PRIVATE_IP=${private_ip}
+KUBECONFIG_PATH=${kubeconfig_path}
+API_LOCAL_PORT=${api_port}
+CONSOLE_LOCAL_PORT=${console_port}
+K3S_JOIN_SERVER_URL=${join_server_url}
+K3S_JOIN_TOKEN=${join_token}
+PROFILE
+  chmod 600 "$(profile_path "${cluster}")"
+}
+
+load_profile() {
+  local cluster="$1"
+  local path
+  path="$(profile_path "${cluster}")"
+  [[ -f "${path}" ]] || die "cluster profile not found: ${path}. Run kadmctl bootstrap first."
+  # shellcheck disable=SC1090
+  source "${path}"
+}
+
+rewrite_kubeconfig_for_tunnel() {
+  local source_file="$1"
+  local target_file="$2"
+  local api_port="$3"
+
+  mkdir -p "$(dirname "${target_file}")"
+  sed -E "s#server: https://[^[:space:]]+#server: https://127.0.0.1:${api_port}#" "${source_file}" > "${target_file}"
+  chmod 600 "${target_file}"
+}
+
+bootstrap_remote_k3s() {
+  local ssh_target="$1"
+  local private_ip="$2"
+  local k3s_version="$3"
+
+  local version_env=""
+  if [[ -n "${k3s_version}" ]]; then
+    version_env="ONECD_K3S_VERSION=${k3s_version}"
+  fi
+
+  ssh "${ssh_target}" "sudo ONECD_PRIVATE_IP='${private_ip}' ${version_env} sh -s" <<'REMOTE'
+set -eu
+
+if command -v k3s >/dev/null 2>&1; then
+  echo "k3s already installed; leaving existing installation in place"
+  exit 0
+fi
+
+args="server --cluster-init --flannel-backend=none --disable-network-policy --disable-kube-proxy --disable=traefik --disable=servicelb --write-kubeconfig-mode=0600"
+
+if [ -n "${ONECD_PRIVATE_IP:-}" ]; then
+  args="${args} --node-ip ${ONECD_PRIVATE_IP} --advertise-address ${ONECD_PRIVATE_IP}"
+fi
+
+if [ -n "${ONECD_K3S_VERSION:-}" ]; then
+  curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${ONECD_K3S_VERSION}" sh -s - ${args}
+else
+  curl -sfL https://get.k3s.io | sh -s - ${args}
+fi
+REMOTE
+}
+
+fetch_remote_kubeconfig() {
+  local ssh_target="$1"
+  local output_file="$2"
+  ssh "${ssh_target}" "sudo cat /etc/rancher/k3s/k3s.yaml" > "${output_file}"
+}
+
+fetch_remote_join_token() {
+  local ssh_target="$1"
+  ssh "${ssh_target}" "sudo cat /var/lib/rancher/k3s/server/node-token"
+}
+
+ssh_host_part() {
+  local ssh_target="$1"
+  local without_user="${ssh_target##*@}"
+  echo "${without_user%%:*}"
+}
+
+kubectl_for() {
+  local kubeconfig_path="$1"
+  shift
+  kubectl --kubeconfig "${kubeconfig_path}" --request-timeout="${KUBECTL_REQUEST_TIMEOUT}" "$@"
+}
+
+kubectl_retry() {
+  local kubeconfig_path="$1"
+  shift
+  retry_command "${KUBECTL_RETRY_ATTEMPTS}" "${KUBECTL_RETRY_DELAY}" kubectl_for "${kubeconfig_path}" "$@"
+}
+
+kubectl_apply_retry() {
+  local kubeconfig_path="$1"
+  shift
+  kubectl_retry "${kubeconfig_path}" apply "$@"
+}
+
+create_namespace_if_missing() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local manifest status
+  manifest="$(mktemp)"
+  kubectl_for "${kubeconfig_path}" create namespace "${namespace}" --dry-run=client -o yaml > "${manifest}"
+  status=0
+  kubectl_apply_retry "${kubeconfig_path}" -f "${manifest}" || status="$?"
+  rm -f "${manifest}"
+  return "${status}"
+}
+
+wait_for_kube_api() {
+  local kubeconfig_path="$1"
+  local tunnel_pid="${2:-}"
+  local attempts=90
+  local i
+  for ((i = 1; i <= attempts; i++)); do
+    if [[ -n "${tunnel_pid}" ]] && ! kill -0 "${tunnel_pid}" >/dev/null 2>&1; then
+      die "Kubernetes API tunnel exited before the API became ready"
+    fi
+    if kubectl_for "${kubeconfig_path}" get --raw=/readyz >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  die "Kubernetes API did not become ready in time"
+}
+
+wait_for_crds_established() {
+  local kubeconfig_path="$1"
+  shift
+
+  local crd
+  for crd in "$@"; do
+    kubectl_retry "${kubeconfig_path}" wait --for=condition=Established "crd/${crd}" --timeout=180s
+  done
+}
+
+wait_for_daemonset_ready() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local name="$3"
+  local timeout_seconds="$4"
+  local deadline=$((SECONDS + timeout_seconds))
+  local state ready desired
+
+  while (( SECONDS < deadline )); do
+    state="$(kubectl_for "${kubeconfig_path}" -n "${namespace}" get daemonset "${name}" -o jsonpath='{.status.numberReady} {.status.desiredNumberScheduled}' 2>/dev/null || true)"
+    ready="${state%% *}"
+    desired="${state##* }"
+    ready="${ready:-0}"
+    desired="${desired:-0}"
+    if [[ "${desired}" =~ ^[0-9]+$ && "${ready}" =~ ^[0-9]+$ && "${desired}" -gt 0 && "${ready}" -ge "${desired}" ]]; then
+      info "daemonset/${name} ready: ${ready}/${desired}"
+      return 0
+    fi
+    info "waiting for daemonset/${name}: ${ready}/${desired}"
+    sleep 5
+  done
+
+  die "timed out waiting for daemonset/${name}"
+}
+
+wait_for_deployment_ready() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local name="$3"
+  local timeout_seconds="$4"
+  local deadline=$((SECONDS + timeout_seconds))
+  local state available desired
+
+  while (( SECONDS < deadline )); do
+    state="$(kubectl_for "${kubeconfig_path}" -n "${namespace}" get deploy "${name}" -o jsonpath='{.status.availableReplicas} {.spec.replicas}' 2>/dev/null || true)"
+    available="${state%% *}"
+    desired="${state##* }"
+    available="${available:-0}"
+    desired="${desired:-0}"
+    if [[ "${desired}" =~ ^[0-9]+$ && "${available}" =~ ^[0-9]+$ && "${desired}" -gt 0 && "${available}" -ge "${desired}" ]]; then
+      info "deployment/${name} ready: ${available}/${desired}"
+      return 0
+    fi
+    info "waiting for deployment/${name}: ${available}/${desired}"
+    sleep 5
+  done
+
+  die "timed out waiting for deployment/${name}"
+}
+
+allow_gateway_api_experimental_upgrade() {
+  local kubeconfig_path="$1"
+  local gateway_api_manifest="$2"
+
+  if ! grep -Fq "gateway.networking.k8s.io/channel: experimental" "${gateway_api_manifest}"; then
+    return 0
+  fi
+
+  info "Allowing Gateway API experimental CRD upgrade"
+  kubectl_retry "${kubeconfig_path}" delete validatingadmissionpolicybinding safe-upgrades.gateway.networking.k8s.io --ignore-not-found
+  kubectl_retry "${kubeconfig_path}" delete validatingadmissionpolicy safe-upgrades.gateway.networking.k8s.io --ignore-not-found
+}
+
+start_api_tunnel() {
+  local ssh_target="$1"
+  local api_port="$2"
+
+  ssh -N -L "${api_port}:127.0.0.1:6443" -o ExitOnForwardFailure=yes "${ssh_target}" >/dev/null 2>&1 &
+  local tunnel_pid="$!"
+  sleep 1
+  if ! kill -0 "${tunnel_pid}" >/dev/null 2>&1; then
+    die "Kubernetes API tunnel failed to start"
+  fi
+  echo "${tunnel_pid}"
+}
+
+stop_pid() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 0
+  kill "${pid}" >/dev/null 2>&1 || true
+  wait "${pid}" >/dev/null 2>&1 || true
+}
+
+start_service_port_forward() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local service="$3"
+  local local_port="$4"
+  local remote_port="$5"
+  local log_file
+  log_file="$(mktemp)"
+
+  kubectl_for "${kubeconfig_path}" -n "${namespace}" port-forward "svc/${service}" "${local_port}:${remote_port}" >"${log_file}" 2>&1 &
+  local port_forward_pid="$!"
+
+  local i
+  for ((i = 1; i <= 30; i++)); do
+    if ! kill -0 "${port_forward_pid}" >/dev/null 2>&1; then
+      cat "${log_file}" >&2 || true
+      rm -f "${log_file}"
+      die "port-forward failed to start for ${namespace}/${service}"
+    fi
+    if grep -Fq "Forwarding from" "${log_file}"; then
+      rm -f "${log_file}"
+      echo "${port_forward_pid}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  cat "${log_file}" >&2 || true
+  rm -f "${log_file}"
+  stop_pid "${port_forward_pid}"
+  die "port-forward did not become ready for ${namespace}/${service}"
+}
+
+base64_decode_value() {
+  local value="$1"
+  if printf '%s' "${value}" | base64 --decode >/dev/null 2>&1; then
+    printf '%s' "${value}" | base64 --decode
+  else
+    printf '%s' "${value}" | base64 -D
+  fi
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  printf '%s' "${value}"
+}
+
+extract_json_token() {
+  sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+fetch_argocd_initial_admin_password() {
+  local kubeconfig_path="$1"
+  local encoded
+  require_command base64
+  encoded="$(kubectl_for "${kubeconfig_path}" -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}')"
+  [[ -n "${encoded}" ]] || die "argocd initial admin password was not found"
+  base64_decode_value "${encoded}"
+}
+
+fetch_argocd_session_token() {
+  local password="$1"
+  local local_port="$2"
+  local response token password_json
+
+  require_command curl
+  password_json="$(json_escape "${password}")"
+  response="$(
+    printf '{"username":"admin","password":"%s"}' "${password_json}" |
+      curl -fksSL --connect-timeout 10 --max-time 60 \
+        -H 'Content-Type: application/json' \
+        --data-binary @- \
+        "http://127.0.0.1:${local_port}/api/v1/session"
+  )"
+  token="$(printf '%s' "${response}" | extract_json_token)"
+  [[ -n "${token}" ]] || die "failed to obtain Argo CD session token"
+  printf '%s' "${token}"
+}
+
+install_component_commands() {
+  local kubeconfig_path="$1"
+  local gateway_api_url="$2"
+  local argocd_url="$3"
+  local rollouts_url="$4"
+  local cilium_version="$5"
+  local k8s_service_host="$6"
+  local tunnel_pid="${7:-}"
+
+  info "Waiting for Kubernetes API"
+  wait_for_kube_api "${kubeconfig_path}" "${tunnel_pid}"
+
+  local gateway_api_manifest argocd_manifest rollouts_manifest
+  cached_manifest_asset "${gateway_api_url}" "Gateway API manifest" gateway_api_manifest
+  cached_manifest_asset "${argocd_url}" "Argo CD manifest" argocd_manifest
+  cached_manifest_asset "${rollouts_url}" "Argo Rollouts manifest" rollouts_manifest
+  local effective_cilium_version cilium_chart
+  effective_cilium_version="${cilium_version:-${DEFAULT_CILIUM_VERSION}}"
+  cilium_chart="$(cilium_chart_path "${effective_cilium_version}")"
+  require_cached_file "${cilium_chart}" "Cilium chart"
+  info "Using cached Cilium chart: ${cilium_chart}"
+
+  info "Installing Gateway API CRDs"
+  allow_gateway_api_experimental_upgrade "${kubeconfig_path}" "${gateway_api_manifest}"
+  kubectl_apply_retry "${kubeconfig_path}" --server-side --force-conflicts -f "${gateway_api_manifest}"
+  info "Waiting for Gateway API CRDs"
+  wait_for_crds_established "${kubeconfig_path}" \
+    gatewayclasses.gateway.networking.k8s.io \
+    gateways.gateway.networking.k8s.io \
+    httproutes.gateway.networking.k8s.io \
+    grpcroutes.gateway.networking.k8s.io \
+    referencegrants.gateway.networking.k8s.io \
+    tlsroutes.gateway.networking.k8s.io
+
+  info "Installing Cilium"
+
+  local cilium_args=(
+    --kubeconfig "${kubeconfig_path}"
+    upgrade --install cilium "${cilium_chart}"
+    --timeout 10m
+    --disable-openapi-validation
+    --namespace kube-system
+    --set kubeProxyReplacement=true
+    --set routingMode=tunnel
+    --set tunnelProtocol=vxlan
+    --set gatewayAPI.enabled=true
+    --set gatewayAPI.hostNetwork.enabled=true
+    --set l7Proxy=true
+    --set operator.replicas=1
+    --set "k8sServiceHost=${k8s_service_host}"
+    --set k8sServicePort=6443
+  )
+  retry_command 3 10 "${HELM_BIN}" "${cilium_args[@]}"
+  wait_for_daemonset_ready "${kubeconfig_path}" kube-system cilium 600
+
+  info "Installing Argo CD"
+  create_namespace_if_missing "${kubeconfig_path}" argocd
+  kubectl_apply_retry "${kubeconfig_path}" --server-side --force-conflicts -n argocd -f "${argocd_manifest}"
+  wait_for_deployment_ready "${kubeconfig_path}" argocd argocd-server 600
+
+  info "Installing Argo Rollouts"
+  create_namespace_if_missing "${kubeconfig_path}" argo-rollouts
+  kubectl_apply_retry "${kubeconfig_path}" --server-side --force-conflicts -n argo-rollouts -f "${rollouts_manifest}"
+  wait_for_deployment_ready "${kubeconfig_path}" argo-rollouts argo-rollouts 600
+}
+
+install_base_components() {
+  local ssh_target="$1"
+  local api_port="$2"
+  local kubeconfig_path="$3"
+  local gateway_api_url="$4"
+  local argocd_url="$5"
+  local rollouts_url="$6"
+  local cilium_version="$7"
+  local k8s_service_host="$8"
+
+  require_command ssh
+  require_command kubectl
+  ensure_helm
+
+  info "Starting temporary Kubernetes API tunnel"
+  local tunnel_pid
+  tunnel_pid="$(start_api_tunnel "${ssh_target}" "${api_port}")"
+
+  local status=0
+  set +e
+  (
+    set -e
+    install_component_commands "${kubeconfig_path}" "${gateway_api_url}" "${argocd_url}" "${rollouts_url}" "${cilium_version}" "${k8s_service_host}" "${tunnel_pid}"
+  )
+  status="$?"
+  set -e
+
+  stop_pid "${tunnel_pid}"
+
+  return "${status}"
+}
+
+apply_delivery_yaml() {
+  local kubeconfig_path="$1"
+  local manifest status
+  manifest="$(mktemp)"
+  cat > "${manifest}"
+  status=0
+  kubectl_apply_retry "${kubeconfig_path}" -f "${manifest}" || status="$?"
+  rm -f "${manifest}"
+  return "${status}"
+}
+
+default_onecd_image_tag() {
+  local onecd_dir="$1"
+  local short
+  short="$(git -C "${onecd_dir}" rev-parse --short=7 HEAD 2>/dev/null || true)"
+  if [[ -n "${short}" ]]; then
+    echo "local-${short}-$(date +%Y%m%d%H%M%S)"
+  else
+    echo "local-$(date +%Y%m%d%H%M%S)"
+  fi
+}
+
+update_overlay_image_tag() {
+  local overlay_file="$1"
+  local tag="$2"
+  local tmp
+  tmp="$(mktemp)"
+
+  if ! awk -v tag="${tag}" '
+    /^  newTag:/ && !updated {
+      print "  newTag: " tag
+      updated = 1
+      next
+    }
+    { print }
+    END {
+      if (!updated) {
+        exit 42
+      }
+    }
+  ' "${overlay_file}" > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to update image tag in ${overlay_file}"
+  fi
+
+  cat "${tmp}" > "${overlay_file}"
+  rm -f "${tmp}"
+}
+
+cmd_publish_onecd() {
+  local onecd_dir="${DEFAULT_ONECD_OVERLAY%/k8s/overlays/prod}"
+  local image="ghcr.io/ccq18/kadm-release-console"
+  local tag=""
+  local platform="linux/amd64"
+  local skip_tests=0
+  local apply=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --onecd-dir)
+        onecd_dir="${2:-}"
+        shift 2
+        ;;
+      --image)
+        image="${2:-}"
+        shift 2
+        ;;
+      --tag)
+        tag="${2:-}"
+        shift 2
+        ;;
+      --platform)
+        platform="${2:-}"
+        shift 2
+        ;;
+      --skip-tests)
+        skip_tests=1
+        shift
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        die "unknown publish-onecd option: $1"
+        ;;
+    esac
+  done
+
+  [[ -d "${onecd_dir}" ]] || die "KADM release console directory not found: ${onecd_dir}"
+  local overlay_file="${onecd_dir}/k8s/overlays/prod/kustomization.yaml"
+  [[ -f "${overlay_file}" ]] || die "KADM release console prod overlay not found: ${overlay_file}"
+
+  tag="${tag:-$(default_onecd_image_tag "${onecd_dir}")}"
+  validate_image_repo "${image}"
+  validate_image_tag "${tag}"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: KADM release console image will not be built or pushed"
+    info "onecd dir: ${onecd_dir}"
+    info "image: ${image}:${tag}"
+    if [[ "${skip_tests}" -eq 1 ]]; then
+      info "tests: skipped"
+    else
+      info "tests: npm test && npm run lint"
+    fi
+    info "platform: ${platform}"
+    info "push: docker push ${image}:${tag}"
+    info "updates overlay: ${overlay_file}"
+    return 0
+  fi
+
+  require_command npm
+  require_command docker
+  require_env ONECD_GHCR_USERNAME
+  require_env ONECD_GHCR_TOKEN
+
+  if [[ "${skip_tests}" -ne 1 ]]; then
+    (cd "${onecd_dir}" && npm test && npm run lint)
+  fi
+
+  docker info >/dev/null
+  printf '%s' "${ONECD_GHCR_TOKEN}" | docker login ghcr.io -u "${ONECD_GHCR_USERNAME}" --password-stdin
+  docker build --platform "${platform}" -t "${image}:${tag}" "${onecd_dir}"
+  docker push "${image}:${tag}"
+  update_overlay_image_tag "${overlay_file}" "${tag}"
+
+  info "published KADM release console image: ${image}:${tag}"
+  info "updated overlay: ${overlay_file}"
+}
+
+emit_onecd_secret_yaml() {
+  local github_token="$1"
+  local argocd_token="$2"
+  local argocd_base_url="$3"
+  local cluster_name="$4"
+  local join_server_url="$5"
+  local join_token="$6"
+  cat <<YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: onecd-secrets
+  namespace: onecd
+type: Opaque
+stringData:
+  GITHUB_TOKEN: |-
+    ${github_token}
+  ARGOCD_BASE_URL: |-
+    ${argocd_base_url}
+  ARGOCD_TOKEN: |-
+    ${argocd_token}
+  ONECD_CLUSTER_NAME: |-
+    ${cluster_name}
+  K3S_JOIN_SERVER_URL: |-
+    ${join_server_url}
+  K3S_JOIN_TOKEN: |-
+    ${join_token}
+YAML
+}
+
+emit_argocd_repo_secret_yaml() {
+  local name="$1"
+  local repo_url="$2"
+  local github_token="$3"
+  cat <<YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-${name}
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: git
+  url: ${repo_url}
+  username: x-access-token
+  password: |-
+    ${github_token}
+YAML
+}
+
+emit_argocd_application_yaml() {
+  local name="$1"
+  local repo_url="$2"
+  local namespace="$3"
+  local path="${4:-k8s/overlays/prod}"
+  local revision="${5:-main}"
+  cat <<YAML
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ${name}
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ${repo_url}
+    targetRevision: ${revision}
+    path: ${path}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ${namespace}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+YAML
+}
+
+emit_ghcr_pull_secret_yaml() {
+  local username="$1"
+  local token="$2"
+  local namespace="${3:-onecd}"
+  local dockerconfig
+  dockerconfig="$(printf '{"auths":{"ghcr.io":{"username":"%s","password":"%s","auth":"%s"}}}' "${username}" "${token}" "$(printf '%s:%s' "${username}" "${token}" | base64 | tr -d '\n')")"
+  cat <<YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ghcr-cred
+  namespace: ${namespace}
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: $(printf '%s' "${dockerconfig}" | base64 | tr -d '\n')
+YAML
+}
+
+cmd_bootstrap() {
+  local ssh_target=""
+  local cluster="${DEFAULT_CLUSTER}"
+  local private_ip=""
+  local api_port="${DEFAULT_API_PORT}"
+  local console_port="${DEFAULT_CONSOLE_PORT}"
+  local k3s_version="${DEFAULT_K3S_VERSION}"
+  local cilium_version=""
+  local gateway_api_url="${DEFAULT_GATEWAY_API_URL}"
+  local argocd_url="${DEFAULT_ARGOCD_URL}"
+  local rollouts_url="${DEFAULT_ROLLOUTS_URL}"
+  local skip_components=0
+  local apply=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        cluster="${2:-}"
+        shift 2
+        ;;
+      --private-ip)
+        private_ip="${2:-}"
+        shift 2
+        ;;
+      --api-port)
+        api_port="${2:-}"
+        shift 2
+        ;;
+      --console-port)
+        console_port="${2:-}"
+        shift 2
+        ;;
+      --k3s-version)
+        k3s_version="${2:-}"
+        shift 2
+        ;;
+      --cilium-version)
+        cilium_version="${2:-}"
+        shift 2
+        ;;
+      --gateway-api-url)
+        gateway_api_url="${2:-}"
+        shift 2
+        ;;
+      --argocd-url)
+        argocd_url="${2:-}"
+        shift 2
+        ;;
+      --rollouts-url)
+        rollouts_url="${2:-}"
+        shift 2
+        ;;
+      --skip-components)
+        skip_components=1
+        shift
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown bootstrap option: $1"
+        ;;
+      *)
+        if [[ -n "${ssh_target}" ]]; then
+          die "unexpected bootstrap argument: $1"
+        fi
+        ssh_target="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "${ssh_target}" ]] || die "bootstrap requires an ssh target, for example root@1.2.3.4"
+  validate_cluster_name "${cluster}"
+  validate_ssh_target "${ssh_target}"
+  validate_optional_machine_value "private ip" "${private_ip}"
+  validate_optional_machine_value "k3s version" "${k3s_version}"
+  validate_optional_machine_value "cilium version" "${cilium_version}"
+  validate_port "${api_port}"
+  validate_port "${console_port}"
+
+  local kubeconfig_path
+  kubeconfig_path="$(kubeconfig_path_for "${cluster}")"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: no remote changes will be made"
+    info "cluster: ${cluster}"
+    info "first master: ${ssh_target}"
+    info "private ip: ${private_ip:-not provided}"
+    info "install: K3s Server + embedded etcd"
+    info "network: flannel disabled, kube-proxy disabled, Traefik/ServiceLB disabled"
+    if [[ "${skip_components}" -eq 1 ]]; then
+      info "components: skipped"
+    else
+      info "components: Gateway API, Cilium, Argo CD, Argo Rollouts"
+      info "delivery credentials: not required for base components"
+    fi
+    info "local api tunnel: https://127.0.0.1:${api_port}"
+    info "local kubeconfig: ${kubeconfig_path}"
+    info "cluster profile: $(profile_path "${cluster}")"
+    info "next: kadmctl connect ${cluster}"
+    return 0
+  fi
+
+  require_command ssh
+  require_command sed
+  require_command mktemp
+
+  info "Installing first K3s server on ${ssh_target}"
+  bootstrap_remote_k3s "${ssh_target}" "${private_ip}" "${k3s_version}"
+
+  local tmp_kubeconfig
+  tmp_kubeconfig="$(mktemp)"
+
+  info "Fetching kubeconfig from ${ssh_target}"
+  fetch_remote_kubeconfig "${ssh_target}" "${tmp_kubeconfig}"
+  rewrite_kubeconfig_for_tunnel "${tmp_kubeconfig}" "${kubeconfig_path}" "${api_port}"
+  rm -f "${tmp_kubeconfig}"
+  local join_token join_host join_server_url
+  join_token="$(fetch_remote_join_token "${ssh_target}")"
+  join_host="${private_ip:-$(ssh_host_part "${ssh_target}")}"
+  join_server_url="https://${join_host}:6443"
+  write_profile "${cluster}" "${ssh_target}" "${private_ip}" "${kubeconfig_path}" "${api_port}" "${console_port}" "${join_server_url}" "${join_token}"
+
+  if [[ "${skip_components}" -ne 1 ]]; then
+    install_base_components "${ssh_target}" "${api_port}" "${kubeconfig_path}" "${gateway_api_url}" "${argocd_url}" "${rollouts_url}" "${cilium_version}" "${join_host}"
+  else
+    info "Skipping base component installation"
+  fi
+
+  info "cluster profile written: $(profile_path "${cluster}")"
+  info "local kubeconfig written: ${kubeconfig_path}"
+    info "connect with: kadmctl connect ${cluster}"
+}
+
+cmd_configure_delivery() {
+  local cluster="${DEFAULT_CLUSTER}"
+  local onecd_overlay="${DEFAULT_ONECD_OVERLAY}"
+  local argocd_base_url="http://argocd-server.argocd.svc.cluster.local"
+  local argocd_local_port="${DEFAULT_ARGOCD_LOCAL_PORT}"
+  local apply=0
+  local cluster_seen=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --onecd-overlay)
+        onecd_overlay="${2:-}"
+        shift 2
+        ;;
+      --argocd-base-url)
+        argocd_base_url="${2:-}"
+        shift 2
+        ;;
+      --argocd-local-port)
+        argocd_local_port="${2:-}"
+        shift 2
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown configure-delivery option: $1"
+        ;;
+      *)
+        if [[ "${cluster_seen}" -eq 1 ]]; then
+          die "unexpected configure-delivery argument: $1"
+        fi
+        cluster="$1"
+        cluster_seen=1
+        shift
+        ;;
+    esac
+  done
+
+  validate_cluster_name "${cluster}"
+  validate_port "${argocd_local_port}"
+  load_profile "${cluster}"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: delivery credentials will not be written"
+    info "cluster: ${CLUSTER_NAME}"
+    info "requires env: ONECD_GITHUB_TOKEN"
+    info "optional env: ONECD_ARGOCD_TOKEN; generated from Argo CD admin session when unset"
+    info "optional env: ONECD_GHCR_USERNAME and ONECD_GHCR_TOKEN"
+    info "creates: onecd/onecd-secrets"
+    info "creates: argocd repository credentials"
+    info "creates: onecd/ghcr-cred when GHCR env vars are set"
+    info "deploys: KADM release console kustomize overlay at ${onecd_overlay}"
+    info "temporary Argo CD port-forward: http://127.0.0.1:${argocd_local_port}"
+    return 0
+  fi
+
+  require_command ssh
+  require_command kubectl
+  require_env ONECD_GITHUB_TOKEN
+  [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
+  [[ -d "${onecd_overlay}" ]] || die "KADM release console overlay directory not found: ${onecd_overlay}"
+
+  if [[ -n "${ONECD_GHCR_USERNAME:-}" || -n "${ONECD_GHCR_TOKEN:-}" ]]; then
+    require_env ONECD_GHCR_USERNAME
+    require_env ONECD_GHCR_TOKEN
+  fi
+
+  info "Starting temporary Kubernetes API tunnel for delivery configuration"
+  local tunnel_pid
+  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
+
+  local argocd_token="${ONECD_ARGOCD_TOKEN:-}"
+  if [[ -z "${argocd_token}" ]]; then
+    info "Generating Argo CD session token for KADM release console"
+    local argocd_password argocd_port_forward_pid token_status
+    argocd_password=""
+    argocd_port_forward_pid=""
+    token_status=0
+
+    set +e
+    argocd_password="$(fetch_argocd_initial_admin_password "${KUBECONFIG_PATH}")"
+    token_status="$?"
+    if [[ "${token_status}" -eq 0 ]]; then
+      argocd_port_forward_pid="$(start_service_port_forward "${KUBECONFIG_PATH}" argocd argocd-server "${argocd_local_port}" 80)"
+      token_status="$?"
+    fi
+    if [[ "${token_status}" -eq 0 ]]; then
+      argocd_token="$(fetch_argocd_session_token "${argocd_password}" "${argocd_local_port}")"
+      token_status="$?"
+    fi
+    set -e
+
+    stop_pid "${argocd_port_forward_pid}"
+    [[ "${token_status}" -eq 0 ]] || {
+      stop_pid "${tunnel_pid}"
+      return "${token_status}"
+    }
+  fi
+
+  local status=0
+  set +e
+  (
+    set -e
+    create_namespace_if_missing "${KUBECONFIG_PATH}" onecd
+    create_namespace_if_missing "${KUBECONFIG_PATH}" argocd
+    create_namespace_if_missing "${KUBECONFIG_PATH}" apps
+
+    emit_onecd_secret_yaml "${ONECD_GITHUB_TOKEN}" "${argocd_token}" "${argocd_base_url}" "${CLUSTER_NAME}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_repo_secret_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_repo_secret_yaml demo-hello "https://github.com/ccq18/demo-hello.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_repo_secret_yaml demo-hello-spring "https://github.com/ccq18/demo-hello-spring.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" onecd | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml demo-hello "https://github.com/ccq18/demo-hello.git" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml demo-hello-spring "https://github.com/ccq18/demo-hello-spring.git" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    if [[ -n "${ONECD_GHCR_USERNAME:-}" ]]; then
+      emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" onecd | apply_delivery_yaml "${KUBECONFIG_PATH}"
+      emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    fi
+    kubectl_apply_retry "${KUBECONFIG_PATH}" -k "${onecd_overlay}"
+    kubectl_retry "${KUBECONFIG_PATH}" -n onecd rollout restart deployment/onecd
+    wait_for_deployment_ready "${KUBECONFIG_PATH}" onecd onecd 300
+  )
+  status="$?"
+  set -e
+
+  stop_pid "${tunnel_pid}"
+  [[ "${status}" -eq 0 ]] || return "${status}"
+
+  info "delivery configuration applied"
+  info "next: kadmctl connect ${CLUSTER_NAME}"
+}
+
+cmd_connect() {
+  local cluster="${DEFAULT_CLUSTER}"
+  local api_port_override=""
+  local console_port_override=""
+  local dry_run=0
+  local cluster_seen=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --api-port)
+        api_port_override="${2:-}"
+        shift 2
+        ;;
+      --console-port)
+        console_port_override="${2:-}"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown connect option: $1"
+        ;;
+      *)
+        if [[ "${cluster_seen}" -eq 1 ]]; then
+          die "unexpected connect argument: $1"
+        fi
+        cluster="$1"
+        cluster_seen=1
+        shift
+        ;;
+    esac
+  done
+
+  validate_cluster_name "${cluster}"
+  load_profile "${cluster}"
+
+  local api_port="${api_port_override:-${API_LOCAL_PORT}}"
+  local console_port="${console_port_override:-${CONSOLE_LOCAL_PORT}}"
+  validate_port "${api_port}"
+  validate_port "${console_port}"
+
+  if [[ "${dry_run}" -eq 1 ]]; then
+    info "DRY RUN: no tunnel or port-forward will be started"
+    info "cluster: ${CLUSTER_NAME}"
+    info "ssh -N -L ${api_port}:127.0.0.1:6443 ${MASTER_SSH}"
+    info "kubectl --kubeconfig ${KUBECONFIG_PATH} -n onecd port-forward svc/onecd ${console_port}:80"
+    info "KADM Console: http://127.0.0.1:${console_port}"
+    return 0
+  fi
+
+  require_command ssh
+  require_command kubectl
+
+  [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
+
+  local ssh_pid=""
+  local port_forward_pid=""
+  local port_forward_log=""
+  cleanup() {
+    stop_pid "${port_forward_pid:-}"
+    stop_pid "${ssh_pid:-}"
+    rm -f "${port_forward_log:-}"
+  }
+  trap cleanup EXIT INT TERM
+
+  info "Starting SSH tunnel for cluster ${CLUSTER_NAME}"
+  ssh -N -L "${api_port}:127.0.0.1:6443" -o ExitOnForwardFailure=yes "${MASTER_SSH}" >/dev/null 2>&1 &
+  ssh_pid="$!"
+  sleep 1
+  if ! kill -0 "${ssh_pid}" >/dev/null 2>&1; then
+    die "SSH tunnel failed to start"
+  fi
+  wait_for_kube_api "${KUBECONFIG_PATH}" "${ssh_pid}"
+
+  info "Starting KADM port-forward"
+  port_forward_log="$(mktemp)"
+  kubectl_for "${KUBECONFIG_PATH}" -n onecd port-forward svc/onecd "${console_port}:80" >"${port_forward_log}" 2>&1 &
+  port_forward_pid="$!"
+
+  local i
+  for ((i = 1; i <= 30; i++)); do
+    if ! kill -0 "${port_forward_pid}" >/dev/null 2>&1; then
+      cat "${port_forward_log}" >&2 || true
+      die "KADM port-forward failed to start"
+    fi
+    if grep -Fq "Forwarding from" "${port_forward_log}"; then
+      break
+    fi
+    sleep 1
+  done
+  if ! grep -Fq "Forwarding from" "${port_forward_log}"; then
+    cat "${port_forward_log}" >&2 || true
+    die "KADM port-forward did not become ready"
+  fi
+
+  info "Connected to cluster: ${CLUSTER_NAME}"
+  info "Kubernetes API: https://127.0.0.1:${api_port}"
+  info "KADM Console: http://127.0.0.1:${console_port}"
+  info "Press Ctrl-C to disconnect."
+
+  wait "${port_forward_pid}"
+}
+
+run_status_command() {
+  local label="$1"
+  shift
+  info ""
+  info "== ${label} =="
+  if "$@"; then
+    return 0
+  fi
+  info "status command failed: ${label}"
+  return 1
+}
+
+cmd_status() {
+  local cluster="${DEFAULT_CLUSTER}"
+  local api_port_override=""
+  local cluster_seen=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --api-port)
+        api_port_override="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown status option: $1"
+        ;;
+      *)
+        if [[ "${cluster_seen}" -eq 1 ]]; then
+          die "unexpected status argument: $1"
+        fi
+        cluster="$1"
+        cluster_seen=1
+        shift
+        ;;
+    esac
+  done
+
+  validate_cluster_name "${cluster}"
+  load_profile "${cluster}"
+
+  local api_port="${api_port_override:-${API_LOCAL_PORT}}"
+  validate_port "${api_port}"
+
+  require_command ssh
+  require_command kubectl
+  [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
+
+  info "Cluster status: ${CLUSTER_NAME}"
+  local tunnel_pid
+  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${api_port}")"
+  wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
+
+  local status=0
+  run_status_command "nodes" kubectl_for "${KUBECONFIG_PATH}" get nodes -o wide || status=1
+  run_status_command "pods" kubectl_for "${KUBECONFIG_PATH}" get pods -A -o wide || status=1
+  run_status_command "cilium daemonset" kubectl_for "${KUBECONFIG_PATH}" -n kube-system get daemonset cilium -o wide || status=1
+  run_status_command "cilium pods" kubectl_for "${KUBECONFIG_PATH}" -n kube-system get pods -l k8s-app=cilium -o wide || status=1
+  run_status_command "cilium daemonset details" kubectl_for "${KUBECONFIG_PATH}" -n kube-system describe daemonset cilium || status=1
+  run_status_command "cilium logs" kubectl_for "${KUBECONFIG_PATH}" -n kube-system logs -l k8s-app=cilium --all-containers=true --tail=160 || status=1
+  run_status_command "cilium operator logs" kubectl_for "${KUBECONFIG_PATH}" -n kube-system logs deployment/cilium-operator --all-containers=true --tail=160 || status=1
+  run_status_command "cilium operator previous logs" kubectl_for "${KUBECONFIG_PATH}" -n kube-system logs deployment/cilium-operator --all-containers=true --tail=160 --previous || status=1
+  run_status_command "recent events" kubectl_for "${KUBECONFIG_PATH}" get events -A --sort-by=.lastTimestamp || status=1
+
+  stop_pid "${tunnel_pid}"
+  return "${status}"
+}
+
+main() {
+  local command="${1:-help}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "${command}" in
+    bootstrap)
+      cmd_bootstrap "$@"
+      ;;
+    install-tools)
+      cmd_install_tools "$@"
+      ;;
+    reset-node)
+      cmd_reset_node "$@"
+      ;;
+    prepare-assets)
+      cmd_prepare_assets "$@"
+      ;;
+    export-assets)
+      cmd_export_assets "$@"
+      ;;
+    import-assets)
+      cmd_import_assets "$@"
+      ;;
+    publish-onecd)
+      cmd_publish_onecd "$@"
+      ;;
+    configure-delivery)
+      cmd_configure_delivery "$@"
+      ;;
+    connect)
+      cmd_connect "$@"
+      ;;
+    status)
+      cmd_status "$@"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      die "unknown command: ${command}"
+      ;;
+  esac
+}
+
+main "$@"

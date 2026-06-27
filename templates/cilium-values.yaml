@@ -1,0 +1,50 @@
+# Cilium Helm values template for the default self-hosted K3s path.
+# This is a contract template, not a directly applied file until rendered.
+
+kubeProxyReplacement: true
+
+routingMode: "${CILIUM_ROUTING_MODE}"
+tunnelProtocol: "${CILIUM_TUNNEL_PROTOCOL}"
+
+gatewayAPI:
+  enabled: true
+  hostNetwork:
+    enabled: true
+
+l7Proxy: true
+
+operator:
+  # Single-node mode should render 1. HA mode should render 2.
+  replicas: ${CILIUM_OPERATOR_REPLICAS}
+
+hubble:
+  enabled: true
+  relay:
+    enabled: false
+  ui:
+    enabled: false
+
+securityContext:
+  capabilities:
+    ciliumAgent:
+      - CHOWN
+      - KILL
+      - NET_ADMIN
+      - NET_RAW
+      - IPC_LOCK
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    cleanCiliumState:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE
+
+prometheus:
+  enabled: true
+
+dashboards:
+  enabled: false

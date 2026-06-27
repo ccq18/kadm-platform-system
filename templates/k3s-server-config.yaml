@@ -1,0 +1,44 @@
+# K3s Server configuration template for the default self-hosted path.
+# Render placeholders before copying to /etc/rancher/k3s/config.yaml.
+# All Server nodes must share the same critical values.
+
+# The first Server starts embedded etcd from day one. Additional Servers must
+# join using the same cluster token and critical network settings.
+cluster-init: true
+
+token: "${K3S_TOKEN}"
+
+node-name: "${NODE_NAME}"
+node-ip: "${NODE_PRIVATE_IP}"
+advertise-address: "${NODE_PRIVATE_IP}"
+
+tls-san:
+  - "${TLS_SAN_1}"
+  - "${TLS_SAN_2}"
+  - "${SERVER1_PRIVATE_IP}"
+  - "${SERVER2_PRIVATE_IP}"
+  - "${SERVER3_PRIVATE_IP}"
+
+cluster-cidr: "${CLUSTER_CIDR}"
+service-cidr: "${SERVICE_CIDR}"
+cluster-dns: "${CLUSTER_DNS}"
+cluster-domain: "${CLUSTER_DOMAIN}"
+
+# Cilium owns pod networking and service dataplane in the default path.
+flannel-backend: none
+disable-network-policy: true
+disable-kube-proxy: true
+
+disable:
+  - traefik
+  - servicelb
+
+# Keep kubeconfig access limited at the network layer. This file intentionally
+# does not open the Kubernetes API to the public internet.
+write-kubeconfig-mode: "0600"
+
+# Snapshot settings are rendered by later tasks. Remote upload is handled by
+# the platform backup workflow instead of embedding object-storage credentials
+# in this config template.
+etcd-snapshot-schedule-cron: "0 */6 * * *"
+etcd-snapshot-retention: 28
