@@ -445,7 +445,7 @@ PROFILE
 
   assert_contains "${output}" "DRY RUN: no tunnel or port-forward will be started"
   assert_contains "${output}" "ssh -N -L 16445:127.0.0.1:6443 root@203.0.113.11"
-  assert_contains "${output}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml -n onecd port-forward svc/onecd 18081:80"
+  assert_contains "${output}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml -n kadm port-forward svc/kadm 18081:80"
   assert_contains "${output}" "http://127.0.0.1:18081"
 }
 
@@ -484,7 +484,7 @@ if [[ "$*" == *"get --raw=/readyz"* ]]; then
   printf 'ok\n'
   exit 0
 fi
-if [[ "$*" == *"port-forward svc/onecd"* ]]; then
+if [[ "$*" == *"port-forward svc/kadm"* ]]; then
   printf 'Forwarding from 127.0.0.1:18081 -> 80\n'
   /bin/sleep 2
   exit 0
@@ -499,7 +499,7 @@ STUB
   assert_contains "${output}" "Connected to cluster: home-prod"
   assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get --raw=/readyz"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n onecd port-forward svc/onecd 18081:80"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm port-forward svc/kadm 18081:80"
 }
 
 test_status_uses_profile_and_api_tunnel() {
@@ -582,9 +582,9 @@ PROFILE
   output="$(run_in_temp_home "${tmp_home}" "${KADMCTL}" configure-delivery home-prod --dry-run)"
 
   assert_contains "${output}" "DRY RUN: delivery credentials will not be written"
-  assert_contains "${output}" "requires env: ONECD_GITHUB_TOKEN"
-  assert_contains "${output}" "optional env: ONECD_ARGOCD_TOKEN"
-  assert_contains "${output}" "creates: onecd/onecd-secrets"
+  assert_contains "${output}" "requires env: KADM_GITHUB_TOKEN"
+  assert_contains "${output}" "optional env: KADM_ARGOCD_TOKEN"
+  assert_contains "${output}" "creates: kadm/kadm-secrets"
   assert_contains "${output}" "creates: argocd repository credentials"
   assert_contains "${output}" "deploys: KADM release console kustomize overlay"
 }
@@ -625,7 +625,7 @@ if [[ "$*" == *"get secret argocd-initial-admin-secret"* ]]; then
   printf 'YWRtaW4tcGFzcw=='
   exit 0
 fi
-if [[ "$*" == *"get deploy onecd"* && "$*" == *"jsonpath"* ]]; then
+if [[ "$*" == *"get deploy kadm"* && "$*" == *"jsonpath"* ]]; then
   printf '1 1'
   exit 0
 fi
@@ -668,15 +668,15 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd get secret argocd-initial-admin-secret"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18081:80"
   assert_file_contains "${calls_file}" "curl -fksSL --connect-timeout 10 --max-time 60"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s create namespace onecd"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s create namespace kadm"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s create namespace argocd"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s create namespace apps"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s apply -k ${tmp_home}/onecd-overlay"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n onecd rollout restart deployment/onecd"
-  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n onecd get deploy onecd -o jsonpath="
-  assert_file_contains "${stdin_file}" "name: onecd-secrets"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm rollout restart deployment/kadm"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm get deploy kadm -o jsonpath="
+  assert_file_contains "${stdin_file}" "name: kadm-secrets"
   assert_file_contains "${stdin_file}" "generated-argocd-token"
-  assert_file_contains "${stdin_file}" "ONECD_CLUSTER_NAME"
+  assert_file_contains "${stdin_file}" "KADM_CLUSTER_NAME"
   assert_file_contains "${stdin_file}" "K3S_JOIN_SERVER_URL"
   assert_file_contains "${stdin_file}" "K3S_JOIN_TOKEN"
   assert_file_contains "${stdin_file}" "argocd.argoproj.io/secret-type: repository"

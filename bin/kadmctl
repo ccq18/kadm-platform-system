@@ -10,9 +10,9 @@ DEFAULT_GATEWAY_API_VERSION="v1.5.1"
 DEFAULT_ARGOCD_VERSION="v3.4.4"
 DEFAULT_ROLLOUTS_VERSION="v1.9.0"
 DEFAULT_CILIUM_VERSION="1.19.5"
-KUBECTL_REQUEST_TIMEOUT="${ONECD_KUBECTL_REQUEST_TIMEOUT:-30s}"
-KUBECTL_RETRY_ATTEMPTS="${ONECD_KUBECTL_RETRY_ATTEMPTS:-5}"
-KUBECTL_RETRY_DELAY="${ONECD_KUBECTL_RETRY_DELAY:-5}"
+KUBECTL_REQUEST_TIMEOUT="${KADM_KUBECTL_REQUEST_TIMEOUT:-${ONECD_KUBECTL_REQUEST_TIMEOUT:-30s}}"
+KUBECTL_RETRY_ATTEMPTS="${KADM_KUBECTL_RETRY_ATTEMPTS:-${ONECD_KUBECTL_RETRY_ATTEMPTS:-5}}"
+KUBECTL_RETRY_DELAY="${KADM_KUBECTL_RETRY_DELAY:-${ONECD_KUBECTL_RETRY_DELAY:-5}}"
 DEFAULT_GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/download/${DEFAULT_GATEWAY_API_VERSION}/experimental-install.yaml"
 DEFAULT_ARGOCD_URL="https://raw.githubusercontent.com/argoproj/argo-cd/${DEFAULT_ARGOCD_VERSION}/manifests/install.yaml"
 DEFAULT_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/download/${DEFAULT_ROLLOUTS_VERSION}/install.yaml"
@@ -1291,8 +1291,8 @@ emit_onecd_secret_yaml() {
 apiVersion: v1
 kind: Secret
 metadata:
-  name: onecd-secrets
-  namespace: onecd
+  name: kadm-secrets
+  namespace: kadm
 type: Opaque
 stringData:
   GITHUB_TOKEN: |-
@@ -1301,7 +1301,7 @@ stringData:
     ${argocd_base_url}
   ARGOCD_TOKEN: |-
     ${argocd_token}
-  ONECD_CLUSTER_NAME: |-
+  KADM_CLUSTER_NAME: |-
     ${cluster_name}
   K3S_JOIN_SERVER_URL: |-
     ${join_server_url}
@@ -1365,7 +1365,7 @@ YAML
 emit_ghcr_pull_secret_yaml() {
   local username="$1"
   local token="$2"
-  local namespace="${3:-onecd}"
+  local namespace="${3:-kadm}"
   local dockerconfig
   dockerconfig="$(printf '{"auths":{"ghcr.io":{"username":"%s","password":"%s","auth":"%s"}}}' "${username}" "${token}" "$(printf '%s:%s' "${username}" "${token}" | base64 | tr -d '\n')")"
   cat <<YAML
@@ -1528,7 +1528,7 @@ cmd_configure_delivery() {
   apply_kadm_env_aliases
   local cluster="${DEFAULT_CLUSTER}"
   local onecd_overlay="${DEFAULT_ONECD_OVERLAY}"
-  local argocd_base_url="http://argocd-server.argocd.svc.cluster.local"
+  local argocd_base_url="https://argocd-server.argocd.svc.cluster.local"
   local argocd_local_port="${DEFAULT_ARGOCD_LOCAL_PORT}"
   local apply=0
   local cluster_seen=0
@@ -1580,12 +1580,12 @@ cmd_configure_delivery() {
   if [[ "${apply}" -ne 1 ]]; then
     info "DRY RUN: delivery credentials will not be written"
     info "cluster: ${CLUSTER_NAME}"
-    info "requires env: ONECD_GITHUB_TOKEN"
-    info "optional env: ONECD_ARGOCD_TOKEN; generated from Argo CD admin session when unset"
-    info "optional env: ONECD_GHCR_USERNAME and ONECD_GHCR_TOKEN"
-    info "creates: onecd/onecd-secrets"
+    info "requires env: KADM_GITHUB_TOKEN"
+    info "optional env: KADM_ARGOCD_TOKEN; generated from Argo CD admin session when unset"
+    info "optional env: KADM_GHCR_USERNAME and KADM_GHCR_TOKEN"
+    info "creates: kadm/kadm-secrets"
     info "creates: argocd repository credentials"
-    info "creates: onecd/ghcr-cred when GHCR env vars are set"
+    info "creates: kadm/ghcr-cred when GHCR env vars are set"
     info "deploys: KADM release console kustomize overlay at ${onecd_overlay}"
     info "temporary Argo CD port-forward: http://127.0.0.1:${argocd_local_port}"
     return 0
@@ -1639,7 +1639,7 @@ cmd_configure_delivery() {
   set +e
   (
     set -e
-    create_namespace_if_missing "${KUBECONFIG_PATH}" onecd
+    create_namespace_if_missing "${KUBECONFIG_PATH}" kadm
     create_namespace_if_missing "${KUBECONFIG_PATH}" argocd
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
 
@@ -1647,16 +1647,16 @@ cmd_configure_delivery() {
     emit_argocd_repo_secret_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml demo-hello "https://github.com/ccq18/demo-hello.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml demo-hello-spring "https://github.com/ccq18/demo-hello-spring.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" onecd | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" kadm | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_application_yaml demo-hello "https://github.com/ccq18/demo-hello.git" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_application_yaml demo-hello-spring "https://github.com/ccq18/demo-hello-spring.git" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
     if [[ -n "${ONECD_GHCR_USERNAME:-}" ]]; then
-      emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" onecd | apply_delivery_yaml "${KUBECONFIG_PATH}"
+      emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" kadm | apply_delivery_yaml "${KUBECONFIG_PATH}"
       emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
     fi
     kubectl_apply_retry "${KUBECONFIG_PATH}" -k "${onecd_overlay}"
-    kubectl_retry "${KUBECONFIG_PATH}" -n onecd rollout restart deployment/onecd
-    wait_for_deployment_ready "${KUBECONFIG_PATH}" onecd onecd 300
+    kubectl_retry "${KUBECONFIG_PATH}" -n kadm rollout restart deployment/kadm
+    wait_for_deployment_ready "${KUBECONFIG_PATH}" kadm kadm 300
   )
   status="$?"
   set -e
@@ -1719,7 +1719,7 @@ cmd_connect() {
     info "DRY RUN: no tunnel or port-forward will be started"
     info "cluster: ${CLUSTER_NAME}"
     info "ssh -N -L ${api_port}:127.0.0.1:6443 ${MASTER_SSH}"
-    info "kubectl --kubeconfig ${KUBECONFIG_PATH} -n onecd port-forward svc/onecd ${console_port}:80"
+    info "kubectl --kubeconfig ${KUBECONFIG_PATH} -n kadm port-forward svc/kadm ${console_port}:80"
     info "KADM Console: http://127.0.0.1:${console_port}"
     return 0
   fi
@@ -1750,7 +1750,7 @@ cmd_connect() {
 
   info "Starting KADM port-forward"
   port_forward_log="$(mktemp)"
-  kubectl_for "${KUBECONFIG_PATH}" -n onecd port-forward svc/onecd "${console_port}:80" >"${port_forward_log}" 2>&1 &
+  kubectl_for "${KUBECONFIG_PATH}" -n kadm port-forward svc/kadm "${console_port}:80" >"${port_forward_log}" 2>&1 &
   port_forward_pid="$!"
 
   local i

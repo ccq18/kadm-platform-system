@@ -146,11 +146,11 @@ Access the platform through an SSH tunnel instead of exposing the Kubernetes API
 bin/kadmctl connect home-prod
 ```
 
-When the `onecd` Service exists, `connect` starts:
+When the `kadm` Service exists, `connect` starts:
 
 ```text
 127.0.0.1:16443 -> first-master:6443
-127.0.0.1:18080 -> svc/onecd:80
+127.0.0.1:18080 -> svc/kadm:80
 ```
 
 Then open:
