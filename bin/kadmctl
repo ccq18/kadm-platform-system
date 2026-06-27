@@ -352,6 +352,13 @@ systemctl stop k3s-agent >/dev/null 2>&1 || true
 systemctl disable k3s >/dev/null 2>&1 || true
 systemctl disable k3s-agent >/dev/null 2>&1 || true
 
+if command -v iptables-save >/dev/null 2>&1 && command -v iptables-restore >/dev/null 2>&1; then
+  iptables-save | grep -v CILIUM_ | grep -v OLD_CILIUM_ | grep -v KUBE- | grep -v CNI- | grep -iv flannel | iptables-restore || true
+fi
+if command -v ip6tables-save >/dev/null 2>&1 && command -v ip6tables-restore >/dev/null 2>&1; then
+  ip6tables-save | grep -v CILIUM_ | grep -v OLD_CILIUM_ | grep -v KUBE- | grep -v CNI- | grep -iv flannel | ip6tables-restore || true
+fi
+
 rm -rf \
   /etc/rancher/k3s \
   /var/lib/rancher/k3s \
@@ -359,6 +366,7 @@ rm -rf \
   /var/lib/cni \
   /etc/cni/net.d \
   /opt/cni/bin \
+  /opt/kadm \
   /run/flannel \
   /var/run/flannel
 REMOTE
