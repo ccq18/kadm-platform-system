@@ -497,12 +497,18 @@ cmd_export_assets() {
 
 cmd_import_assets() {
   local archive="${1:-}"
+  local archive_listing
   [[ -n "${archive}" ]] || die "import-assets requires a bundle path"
   [[ $# -eq 1 ]] || die "unexpected import-assets arguments"
   [[ -f "${archive}" ]] || die "offline asset bundle not found: ${archive}"
   require_command tar
 
-  if ! tar -tzf "${archive}" | grep -Eq '^cache/(manifests|charts)/'; then
+  archive_listing="$(tar -tzf "${archive}")"
+  if ! printf '%s\n' "${archive_listing}" | awk '
+    /^cache\/manifests\// { manifests = 1 }
+    /^cache\/charts\// { charts = 1 }
+    END { exit !(manifests && charts) }
+  '; then
     die "offline asset bundle must contain cache/manifests and cache/charts entries"
   fi
 
