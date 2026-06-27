@@ -1142,6 +1142,79 @@ STUB
   assert_file_contains "${stdin_file}" "/etc/rancher/k3s"
 }
 
+test_cleanup_legacy_onecd_dry_run_describes_legacy_resources() {
+  local tmp_home
+  tmp_home="$(mktemp -d)"
+  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
+  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+
+  local output
+  output="$(HOME="${tmp_home}" "${KADMCTL}" cleanup-legacy-onecd home-prod --dry-run)"
+
+  assert_contains "${output}" "DRY RUN: no legacy cluster resources will be deleted"
+  assert_contains "${output}" "cluster: home-prod"
+  assert_contains "${output}" "deletes: argocd application onecd"
+  assert_contains "${output}" "deletes: argocd repo secret repo-onecd"
+  assert_contains "${output}" "deletes: namespace onecd"
+}
+
+test_cleanup_legacy_onecd_apply_deletes_legacy_resources() {
+  local tmp_home tmp_bin calls_file
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
+  cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/onecd/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+
+  cat > "${tmp_bin}/ssh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"-N -L"* ]]; then
+  trap 'exit 0' TERM INT
+  while true; do /bin/sleep 1; done
+fi
+STUB
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get --raw=/readyz"* ]]; then
+  printf 'ok\n'
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" cleanup-legacy-onecd home-prod --apply)"
+
+  assert_contains "${output}" "legacy onecd resources deleted"
+  assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s get --raw=/readyz"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd delete application onecd --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n argocd delete secret repo-onecd --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n apps delete role onecd-rollouts --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s delete clusterrole onecd-cluster-read --ignore-not-found"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s delete namespace onecd --ignore-not-found"
+}
+
 test_bootstrap_dry_run_prints_safe_plan
 test_bootstrap_apply_writes_profile_rewrites_kubeconfig_and_installs_base_components
 test_bootstrap_retries_transient_manifest_apply_failures
@@ -1164,5 +1237,7 @@ test_export_assets_packages_offline_cache
 test_import_assets_restores_offline_cache
 test_reset_node_dry_run_is_safe
 test_reset_node_apply_runs_remote_cleanup_script
+test_cleanup_legacy_onecd_dry_run_describes_legacy_resources
+test_cleanup_legacy_onecd_apply_deletes_legacy_resources
 
 echo "kadmctl tests passed"

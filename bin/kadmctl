@@ -43,6 +43,7 @@ Usage:
   kadmctl connect [cluster] [--api-port <port>] [--console-port <port>] [--dry-run]
   kadmctl status [cluster] [--api-port <port>]
   kadmctl reset-node <ssh-target> [--dry-run|--apply]
+  kadmctl cleanup-legacy-onecd [cluster] [--api-port <port>] [--dry-run|--apply]
   kadmctl help
 
 Examples:
@@ -56,6 +57,7 @@ Examples:
   kadmctl connect home-prod
   kadmctl status home-prod
   kadmctl reset-node root@1.2.3.4 --apply
+  kadmctl cleanup-legacy-onecd home-prod --apply
   kadmctl connect --dry-run
 
 Safety:
@@ -1873,6 +1875,81 @@ cmd_status() {
   return "${status}"
 }
 
+cmd_cleanup_legacy_onecd() {
+  local cluster="${DEFAULT_CLUSTER}"
+  local api_port_override=""
+  local apply=0
+  local cluster_seen=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --api-port)
+        api_port_override="${2:-}"
+        shift 2
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown cleanup-legacy-onecd option: $1"
+        ;;
+      *)
+        if [[ "${cluster_seen}" -eq 1 ]]; then
+          die "unexpected cleanup-legacy-onecd argument: $1"
+        fi
+        cluster="$1"
+        cluster_seen=1
+        shift
+        ;;
+    esac
+  done
+
+  validate_cluster_name "${cluster}"
+  load_profile "${cluster}"
+
+  local api_port="${api_port_override:-${API_LOCAL_PORT}}"
+  validate_port "${api_port}"
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: no legacy cluster resources will be deleted"
+    info "cluster: ${CLUSTER_NAME}"
+    info "deletes: argocd application onecd"
+    info "deletes: argocd repo secret repo-onecd"
+    info "deletes: apps role/rolebinding onecd-rollouts"
+    info "deletes: clusterrole/clusterrolebinding onecd-cluster-read"
+    info "deletes: namespace onecd"
+    return 0
+  fi
+
+  require_command ssh
+  require_command kubectl
+  [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
+
+  local tunnel_pid
+  tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${api_port}")"
+  wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
+
+  kubectl_retry "${KUBECONFIG_PATH}" -n argocd delete application onecd --ignore-not-found
+  kubectl_retry "${KUBECONFIG_PATH}" -n argocd delete secret repo-onecd --ignore-not-found
+  kubectl_retry "${KUBECONFIG_PATH}" -n apps delete rolebinding onecd-rollouts --ignore-not-found
+  kubectl_retry "${KUBECONFIG_PATH}" -n apps delete role onecd-rollouts --ignore-not-found
+  kubectl_retry "${KUBECONFIG_PATH}" delete clusterrolebinding onecd-cluster-read --ignore-not-found
+  kubectl_retry "${KUBECONFIG_PATH}" delete clusterrole onecd-cluster-read --ignore-not-found
+  kubectl_retry "${KUBECONFIG_PATH}" delete namespace onecd --ignore-not-found
+
+  stop_pid "${tunnel_pid}"
+  info "legacy onecd resources deleted"
+}
+
 main() {
   local command="${1:-help}"
   if [[ $# -gt 0 ]]; then
@@ -1912,6 +1989,9 @@ main() {
       ;;
     status)
       cmd_status "$@"
+      ;;
+    cleanup-legacy-onecd)
+      cmd_cleanup_legacy_onecd "$@"
       ;;
     help|-h|--help)
       usage
