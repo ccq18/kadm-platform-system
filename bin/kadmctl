@@ -954,10 +954,9 @@ local_ipv4_addresses() {
   hostname -I 2>/dev/null | tr ' ' '\n'
 }
 
-is_local_ssh_target() {
-  local ssh_target="$1"
-  local host
-  host="$(ssh_host_part "${ssh_target}")"
+is_local_address() {
+  local host="$1"
+  [[ -n "${host}" ]] || return 1
   [[ "${host}" == "localhost" || "${host}" == "127.0.0.1" ]] && return 0
   local ip
   while read -r ip; do
@@ -965,6 +964,11 @@ is_local_ssh_target() {
     [[ "${host}" == "${ip}" ]] && return 0
   done < <(local_ipv4_addresses)
   return 1
+}
+
+is_local_ssh_target() {
+  local ssh_target="$1"
+  is_local_address "$(ssh_host_part "${ssh_target}")"
 }
 
 kubectl_for() {
@@ -2212,7 +2216,7 @@ cmd_configure_delivery() {
   fi
 
   local tunnel_pid
-  if is_local_ssh_target "${MASTER_SSH}"; then
+  if is_local_ssh_target "${MASTER_SSH}" || is_local_address "${MASTER_PRIVATE_IP:-}"; then
     info "Using local Kubernetes API access for delivery configuration"
     tunnel_pid=""
   else
@@ -2444,7 +2448,7 @@ cmd_status() {
 
   info "Cluster status: ${CLUSTER_NAME}"
   local tunnel_pid
-  if is_local_ssh_target "${MASTER_SSH}"; then
+  if is_local_ssh_target "${MASTER_SSH}" || is_local_address "${MASTER_PRIVATE_IP:-}"; then
     info "Using local Kubernetes API access"
     tunnel_pid=""
   else
@@ -2527,7 +2531,7 @@ cmd_cleanup_legacy_onecd() {
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
   local tunnel_pid
-  if is_local_ssh_target "${MASTER_SSH}"; then
+  if is_local_ssh_target "${MASTER_SSH}" || is_local_address "${MASTER_PRIVATE_IP:-}"; then
     info "Using local Kubernetes API access"
     tunnel_pid=""
   else
@@ -2633,7 +2637,7 @@ cmd_configure_demo_apps() {
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
   local tunnel_pid
-  if is_local_ssh_target "${MASTER_SSH}"; then
+  if is_local_ssh_target "${MASTER_SSH}" || is_local_address "${MASTER_PRIVATE_IP:-}"; then
     info "Using local Kubernetes API access"
     tunnel_pid=""
   else
@@ -2728,7 +2732,7 @@ cmd_configure_cluster_dns() {
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
   local tunnel_pid
-  if is_local_ssh_target "${MASTER_SSH}"; then
+  if is_local_ssh_target "${MASTER_SSH}" || is_local_address "${MASTER_PRIVATE_IP:-}"; then
     info "Using local Kubernetes API access"
     tunnel_pid=""
   else
