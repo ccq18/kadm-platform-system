@@ -1245,6 +1245,12 @@ current_coredns_nodehosts() {
   kubectl_for "${kubeconfig_path}" -n kube-system get configmap coredns -o jsonpath='{.data.NodeHosts}' 2>/dev/null || true
 }
 
+repo_server_gitops_probe_command() {
+  cat <<'SH'
+if command -v getent >/dev/null 2>&1; then getent hosts github.com >/dev/null; getent hosts ghcr.io >/dev/null; fi; timeout 20 git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
+SH
+}
+
 append_nodehosts_entry() {
   local current="$1"
   local entry="$2"
@@ -1269,15 +1275,10 @@ validate_gitops_dns() {
   local kubeconfig_path="$1"
   shift
   local upstreams=("$@")
-  local nodehosts_content github_ip ghcr_ip
+  local nodehosts_content github_ip ghcr_ip probe_command
+  probe_command="$(repo_server_gitops_probe_command)"
 
-  if kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
-if command -v getent >/dev/null 2>&1; then
-  getent hosts github.com >/dev/null
-  getent hosts ghcr.io >/dev/null
-fi
-git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
-'; then
+  if kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec "${probe_command}"; then
     info "GitOps DNS validation passed"
     return 0
   fi
@@ -1291,13 +1292,7 @@ git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
   nodehosts_content="$(current_coredns_nodehosts "${kubeconfig_path}")"
   apply_cluster_dns_upstreams "${kubeconfig_path}" "${nodehosts_content}" "${upstreams[@]}"
 
-  if kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
-if command -v getent >/dev/null 2>&1; then
-  getent hosts github.com >/dev/null
-  getent hosts ghcr.io >/dev/null
-fi
-git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
-'; then
+  if kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec "${probe_command}"; then
     info "GitOps DNS validation passed after CoreDNS override"
     return 0
   fi
@@ -1312,13 +1307,7 @@ git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
   nodehosts_content="$(append_nodehosts_entry "${nodehosts_content}" "${ghcr_ip} ghcr.io")"
   apply_cluster_dns_upstreams "${kubeconfig_path}" "${nodehosts_content}" "${upstreams[@]}"
 
-  kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
-if command -v getent >/dev/null 2>&1; then
-  getent hosts github.com >/dev/null
-  getent hosts ghcr.io >/dev/null
-fi
-git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
-'
+  kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec "${probe_command}"
   info "GitOps DNS validation passed after CoreDNS host alias fallback"
 }
 
