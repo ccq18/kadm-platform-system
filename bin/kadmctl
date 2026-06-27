@@ -105,6 +105,15 @@ apply_kadm_env_aliases() {
   [[ -n "${ONECD_ARGOCD_TOKEN:-}" || -z "${KADM_ARGOCD_TOKEN:-}" ]] || export ONECD_ARGOCD_TOKEN="${KADM_ARGOCD_TOKEN}"
 }
 
+resolve_ipv4_address() {
+  local host="$1"
+  if command -v getent >/dev/null 2>&1; then
+    getent ahostsv4 "${host}" 2>/dev/null | awk 'NR == 1 { print $1; exit }'
+    return 0
+  fi
+  return 1
+}
+
 retry_command() {
   local attempts="$1"
   local delay="$2"
@@ -1222,17 +1231,45 @@ install_component_commands() {
 apply_cluster_dns_upstreams() {
   local kubeconfig_path="$1"
   shift
+  local nodehosts_content="$1"
+  shift
   local upstreams=("$@")
 
-  emit_coredns_config_yaml coredns "${upstreams[@]}" | apply_delivery_yaml "${kubeconfig_path}"
+  emit_coredns_config_yaml "${nodehosts_content}" "${upstreams[@]}" | apply_delivery_yaml "${kubeconfig_path}"
   kubectl_retry "${kubeconfig_path}" -n kube-system rollout restart deployment/coredns
   wait_for_deployment_ready "${kubeconfig_path}" kube-system coredns 300
+}
+
+current_coredns_nodehosts() {
+  local kubeconfig_path="$1"
+  kubectl_for "${kubeconfig_path}" -n kube-system get configmap coredns -o jsonpath='{.data.NodeHosts}' 2>/dev/null || true
+}
+
+append_nodehosts_entry() {
+  local current="$1"
+  local entry="$2"
+  if [[ -z "${entry}" ]]; then
+    printf '%s' "${current}"
+    return 0
+  fi
+
+  if printf '%s\n' "${current}" | grep -Fqx "${entry}"; then
+    printf '%s' "${current}"
+    return 0
+  fi
+
+  if [[ -n "${current}" ]]; then
+    printf '%s\n%s' "${current}" "${entry}"
+  else
+    printf '%s' "${entry}"
+  fi
 }
 
 validate_gitops_dns() {
   local kubeconfig_path="$1"
   shift
   local upstreams=("$@")
+  local nodehosts_content github_ip ghcr_ip
 
   if kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
 if command -v getent >/dev/null 2>&1; then
@@ -1251,7 +1288,29 @@ git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
   fi
 
   info "Applying CoreDNS upstream override: ${upstreams[*]}"
-  apply_cluster_dns_upstreams "${kubeconfig_path}" "${upstreams[@]}"
+  nodehosts_content="$(current_coredns_nodehosts "${kubeconfig_path}")"
+  apply_cluster_dns_upstreams "${kubeconfig_path}" "${nodehosts_content}" "${upstreams[@]}"
+
+  if kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
+if command -v getent >/dev/null 2>&1; then
+  getent hosts github.com >/dev/null
+  getent hosts ghcr.io >/dev/null
+fi
+git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
+'; then
+    info "GitOps DNS validation passed after CoreDNS override"
+    return 0
+  fi
+
+  github_ip="$(resolve_ipv4_address github.com || true)"
+  ghcr_ip="$(resolve_ipv4_address ghcr.io || true)"
+  [[ -n "${github_ip}" ]] || die "cluster pods still cannot resolve github.com and the server could not resolve it for a host alias fallback"
+  [[ -n "${ghcr_ip}" ]] || die "cluster pods still cannot resolve ghcr.io and the server could not resolve it for a host alias fallback"
+
+  info "Applying CoreDNS host aliases for github.com and ghcr.io"
+  nodehosts_content="$(append_nodehosts_entry "${nodehosts_content}" "${github_ip} github.com")"
+  nodehosts_content="$(append_nodehosts_entry "${nodehosts_content}" "${ghcr_ip} ghcr.io")"
+  apply_cluster_dns_upstreams "${kubeconfig_path}" "${nodehosts_content}" "${upstreams[@]}"
 
   kubectl_retry "${kubeconfig_path}" -n argocd exec deploy/argocd-repo-server -- sh -ec '
 if command -v getent >/dev/null 2>&1; then
@@ -1260,7 +1319,7 @@ if command -v getent >/dev/null 2>&1; then
 fi
 git ls-remote https://github.com/argoproj/argo-cd.git HEAD >/dev/null
 '
-  info "GitOps DNS validation passed after CoreDNS override"
+  info "GitOps DNS validation passed after CoreDNS host alias fallback"
 }
 
 install_base_components() {
@@ -1631,6 +1690,7 @@ YAML
 }
 
 emit_coredns_config_yaml() {
+  local nodehosts_content="${1:-}"
   shift
   local upstreams=("$@")
   [[ "${#upstreams[@]}" -gt 0 ]] || die "at least one DNS upstream is required"
@@ -1664,6 +1724,8 @@ data:
         forward . ${upstreams[*]}
     }
     import /etc/coredns/custom/*.server
+  NodeHosts: |
+$(printf '%s\n' "${nodehosts_content}" | sed 's/^/    /')
 YAML
 }
 
@@ -2632,7 +2694,7 @@ cmd_configure_cluster_dns() {
   tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
   wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
 
-  apply_cluster_dns_upstreams "${KUBECONFIG_PATH}" "${upstreams[@]}"
+  apply_cluster_dns_upstreams "${KUBECONFIG_PATH}" "$(current_coredns_nodehosts "${KUBECONFIG_PATH}")" "${upstreams[@]}"
 
   stop_pid "${tunnel_pid}"
   info "cluster dns configured"
