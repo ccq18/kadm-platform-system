@@ -23,6 +23,7 @@ LEGACY_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/latest/d
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_PARENT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEFAULT_ONECD_OVERLAY="${WORKSPACE_PARENT}/kadm-release-console/k8s/overlays/prod"
+DEFAULT_APP_CONFIGS_DIR="${WORKSPACE_PARENT}/kadm-app-configs"
 DEFAULT_HELM_VERSION="v3.15.4"
 HELM_BIN=""
 
@@ -38,7 +39,7 @@ Usage:
   kadmctl import-assets <path>
   kadmctl publish-release-console [--repo-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
   kadmctl publish-onecd [--onecd-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
-  kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--dry-run|--apply]
+  kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--app-configs-dir <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--dry-run|--apply]
   kadmctl connect [cluster] [--api-port <port>] [--console-port <port>] [--dry-run]
   kadmctl status [cluster] [--api-port <port>]
   kadmctl reset-node <ssh-target> [--dry-run|--apply]
@@ -1362,6 +1363,21 @@ spec:
 YAML
 }
 
+emit_kadm_apps_config_yaml() {
+  local apps_file="$1"
+  [[ -f "${apps_file}" ]] || die "app config file not found: ${apps_file}"
+  cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kadm-apps-config
+  namespace: kadm
+data:
+  apps.json: |
+$(sed 's/^/    /' "${apps_file}")
+YAML
+}
+
 emit_ghcr_pull_secret_yaml() {
   local username="$1"
   local token="$2"
@@ -1528,6 +1544,7 @@ cmd_configure_delivery() {
   apply_kadm_env_aliases
   local cluster="${DEFAULT_CLUSTER}"
   local onecd_overlay="${DEFAULT_ONECD_OVERLAY}"
+  local app_configs_dir="${DEFAULT_APP_CONFIGS_DIR}"
   local argocd_base_url="https://argocd-server.argocd.svc.cluster.local"
   local argocd_local_port="${DEFAULT_ARGOCD_LOCAL_PORT}"
   local apply=0
@@ -1537,6 +1554,10 @@ cmd_configure_delivery() {
     case "$1" in
       --onecd-overlay)
         onecd_overlay="${2:-}"
+        shift 2
+        ;;
+      --app-configs-dir)
+        app_configs_dir="${2:-}"
         shift 2
         ;;
       --argocd-base-url)
@@ -1584,9 +1605,11 @@ cmd_configure_delivery() {
     info "optional env: KADM_ARGOCD_TOKEN; generated from Argo CD admin session when unset"
     info "optional env: KADM_GHCR_USERNAME and KADM_GHCR_TOKEN"
     info "creates: kadm/kadm-secrets"
+    info "creates: kadm/kadm-apps-config"
     info "creates: argocd repository credentials"
     info "creates: kadm/ghcr-cred when GHCR env vars are set"
     info "deploys: KADM release console kustomize overlay at ${onecd_overlay}"
+    info "apps repo: ${app_configs_dir}"
     info "temporary Argo CD port-forward: http://127.0.0.1:${argocd_local_port}"
     return 0
   fi
@@ -1596,6 +1619,8 @@ cmd_configure_delivery() {
   require_env ONECD_GITHUB_TOKEN
   [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
   [[ -d "${onecd_overlay}" ]] || die "KADM release console overlay directory not found: ${onecd_overlay}"
+  [[ -d "${app_configs_dir}" ]] || die "KADM app configs directory not found: ${app_configs_dir}"
+  [[ -f "${app_configs_dir}/apps/apps.json" ]] || die "KADM app configs file not found: ${app_configs_dir}/apps/apps.json"
 
   if [[ -n "${ONECD_GHCR_USERNAME:-}" || -n "${ONECD_GHCR_TOKEN:-}" ]]; then
     require_env ONECD_GHCR_USERNAME
@@ -1644,12 +1669,12 @@ cmd_configure_delivery() {
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
 
     emit_onecd_secret_yaml "${ONECD_GITHUB_TOKEN}" "${argocd_token}" "${argocd_base_url}" "${CLUSTER_NAME}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_repo_secret_yaml demo-hello "https://github.com/ccq18/demo-hello.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_repo_secret_yaml demo-hello-spring "https://github.com/ccq18/demo-hello-spring.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_repo_secret_yaml kadm-app-configs "https://github.com/ccq18/kadm-app-configs.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" kadm | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_application_yaml demo-hello "https://github.com/ccq18/demo-hello.git" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_application_yaml demo-hello-spring "https://github.com/ccq18/demo-hello-spring.git" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml demo-hello "https://github.com/ccq18/kadm-app-configs.git" apps "apps/demo-hello/overlays/prod" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml demo-hello-spring "https://github.com/ccq18/kadm-app-configs.git" apps "apps/demo-hello-spring/overlays/prod" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     if [[ -n "${ONECD_GHCR_USERNAME:-}" ]]; then
       emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" kadm | apply_delivery_yaml "${KUBECONFIG_PATH}"
       emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"

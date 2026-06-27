@@ -135,10 +135,10 @@ export KADM_GITHUB_TOKEN=<new-token>
 export KADM_GHCR_USERNAME=<github-user>
 export KADM_GHCR_TOKEN=<ghcr-token>
 
-bin/kadmctl configure-delivery home-prod --apply
+bin/kadmctl configure-delivery home-prod --app-configs-dir /path/to/kadm-app-configs --apply
 ```
 
-`publish-release-console` triggers the `kadm-release-console` GitHub Actions workflow, waits for it to finish, and fast-forwards the local repo so the overlay tag matches the build output. `configure-delivery` reads secrets from environment variables, generates an Argo CD session token when `KADM_ARGOCD_TOKEN` is not provided, applies Kubernetes Secrets through transient local manifests so failed API calls can be retried, configures Argo CD repository credentials for the current repositories, includes the K3s join token from the local bootstrap profile, and deploys the KADM release console Kustomize overlay. `KADM_*` environment variables are the preferred interface; `ONECD_*` names remain supported as compatibility aliases. Do not pass tokens as command-line arguments.
+`publish-release-console` triggers the `kadm-release-console` GitHub Actions workflow, waits for it to finish, and fast-forwards the local repo so the overlay tag matches the build output. `configure-delivery` reads secrets from environment variables, generates an Argo CD session token when `KADM_ARGOCD_TOKEN` is not provided, applies Kubernetes Secrets through transient local manifests so failed API calls can be retried, configures Argo CD repository credentials for `kadm-release-console` and `kadm-app-configs`, injects `kadm-app-configs/apps/apps.json` into the `kadm-apps-config` ConfigMap, includes the K3s join token from the local bootstrap profile, and deploys the KADM release console Kustomize overlay. `KADM_*` environment variables are the preferred interface; `ONECD_*` names remain supported as compatibility aliases. Do not pass tokens as command-line arguments.
 
 Access the platform through an SSH tunnel instead of exposing the Kubernetes API publicly:
 

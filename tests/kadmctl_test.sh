@@ -565,9 +565,11 @@ test_bootstrap_rejects_unsafe_profile_values() {
 }
 
 test_configure_delivery_dry_run_describes_required_inputs() {
-  local tmp_home
+  local tmp_home tmp_app_configs
   tmp_home="$(mktemp -d)"
+  tmp_app_configs="$(mktemp -d)"
   mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd"
+  mkdir -p "${tmp_app_configs}/apps"
   cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
@@ -577,26 +579,30 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  printf '[]\n' > "${tmp_app_configs}/apps/apps.json"
 
   local output
-  output="$(run_in_temp_home "${tmp_home}" "${KADMCTL}" configure-delivery home-prod --dry-run)"
+  output="$(run_in_temp_home "${tmp_home}" "${KADMCTL}" configure-delivery home-prod --app-configs-dir "${tmp_app_configs}" --dry-run)"
 
   assert_contains "${output}" "DRY RUN: delivery credentials will not be written"
   assert_contains "${output}" "requires env: KADM_GITHUB_TOKEN"
   assert_contains "${output}" "optional env: KADM_ARGOCD_TOKEN"
   assert_contains "${output}" "creates: kadm/kadm-secrets"
   assert_contains "${output}" "creates: argocd repository credentials"
+  assert_contains "${output}" "creates: kadm/kadm-apps-config"
   assert_contains "${output}" "deploys: KADM release console kustomize overlay"
 }
 
 test_configure_delivery_apply_creates_secrets_without_token_in_arguments() {
-  local tmp_home tmp_bin calls_file stdin_file port_ready_file
+  local tmp_home tmp_bin calls_file stdin_file port_ready_file tmp_app_configs
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   stdin_file="${tmp_home}/stdin.log"
   port_ready_file="${tmp_home}/argocd-port-ready"
+  tmp_app_configs="$(mktemp -d)"
   mkdir -p "${tmp_home}/.onecd/clusters/home-prod" "${tmp_home}/.kube/onecd" "${tmp_home}/onecd-overlay"
+  mkdir -p "${tmp_app_configs}/apps"
   cat > "${tmp_home}/.onecd/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
@@ -606,6 +612,44 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/onecd/home-prod.yaml"
+  cat > "${tmp_app_configs}/apps/apps.json" <<'JSON'
+[
+  {
+    "id": "demo-hello",
+    "name": "Demo Hello",
+    "github": {
+      "owner": "ccq18",
+      "repo": "demo-hello",
+      "workflow": "build-and-publish.yaml",
+      "ref": "main"
+    },
+    "argocd": {
+      "application": "demo-hello"
+    },
+    "rollout": {
+      "namespace": "apps",
+      "name": "hello"
+    }
+  },
+  {
+    "id": "demo-hello-spring",
+    "name": "Demo Hello Spring",
+    "github": {
+      "owner": "ccq18",
+      "repo": "demo-hello-spring",
+      "workflow": "build-and-publish.yaml",
+      "ref": "main"
+    },
+    "argocd": {
+      "application": "demo-hello-spring"
+    },
+    "rollout": {
+      "namespace": "apps",
+      "name": "hellospring"
+    }
+  }
+]
+JSON
 
   cat > "${tmp_bin}/ssh" <<'STUB'
 #!/usr/bin/env bash
@@ -660,7 +704,7 @@ STUB
   chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
 
   assert_contains "${output}" "delivery configuration applied"
   assert_contains "${output}" "Generating Argo CD session token for KADM release console"
@@ -675,20 +719,22 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm rollout restart deployment/kadm"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/onecd/home-prod.yaml --request-timeout=30s -n kadm get deploy kadm -o jsonpath="
   assert_file_contains "${stdin_file}" "name: kadm-secrets"
+  assert_file_contains "${stdin_file}" "name: kadm-apps-config"
   assert_file_contains "${stdin_file}" "generated-argocd-token"
   assert_file_contains "${stdin_file}" "KADM_CLUSTER_NAME"
   assert_file_contains "${stdin_file}" "K3S_JOIN_SERVER_URL"
   assert_file_contains "${stdin_file}" "K3S_JOIN_TOKEN"
   assert_file_contains "${stdin_file}" "argocd.argoproj.io/secret-type: repository"
-  assert_file_contains "${stdin_file}" "https://github.com/ccq18/demo-hello.git"
+  assert_file_contains "${stdin_file}" "\"id\": \"demo-hello\""
   assert_file_contains "${stdin_file}" "name: ghcr-cred"
   assert_file_contains "${stdin_file}" "kind: Application"
   assert_file_contains "${stdin_file}" "name: kadm-release-console"
   assert_file_contains "${stdin_file}" "name: demo-hello"
   assert_file_contains "${stdin_file}" "name: demo-hello-spring"
   assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-release-console.git"
-  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/demo-hello.git"
-  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/demo-hello-spring.git"
+  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-app-configs.git"
+  assert_file_contains "${stdin_file}" "path: apps/demo-hello/overlays/prod"
+  assert_file_contains "${stdin_file}" "path: apps/demo-hello-spring/overlays/prod"
   if grep -Fq "secret-token" "${calls_file}" || grep -Fq "generated-argocd-token" "${calls_file}" || grep -Fq "admin-pass" "${calls_file}" || grep -Fq "ghcr-token" "${calls_file}"; then
     fail "token leaked into command arguments"
   fi
