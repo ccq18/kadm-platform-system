@@ -84,14 +84,30 @@ The `--apply` mode must not be added casually. It must print the target host, cl
 Day-0 entrypoints are now the bootstrap scripts under [`bootstrap/`](/Users/lrd/mnt/homepc/data/homepcdata/kadm-platform-system/bootstrap):
 
 ```bash
-# On the first server.
-export KADM_GITHUB_TOKEN=<github-token>
+# On the first server. This downloads the latest platform offline bundle by default.
 curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm.sh | \
-  bash -s -- all --cluster home-prod --access-host root@203.0.113.11 --private-ip 10.0.0.11
+  bash -s -- all \
+    --cluster home-prod \
+    --access-host root@203.0.113.11 \
+    --private-ip 10.0.0.11
 
 # On the operator laptop.
 curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm-client.sh | \
   bash -s -- --cluster home-prod --server root@203.0.113.11
+```
+
+The default server installer bundle is:
+
+- Release page: <https://github.com/ccq18/kadm-platform-assets/releases/tag/bundle-latest>
+- Stable asset URL: <https://github.com/ccq18/kadm-platform-assets/releases/download/bundle-latest/kadm-platform-assets.tgz>
+
+Override the bundle source when testing a different build:
+
+```bash
+export KADM_ASSET_BUNDLE_URL=https://github.com/ccq18/kadm-platform-assets/releases/download/bundle-latest/kadm-platform-assets.tgz
+
+curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm.sh | \
+  bash -s -- prepare
 ```
 
 `install-kadm.sh` splits first install into:
@@ -140,8 +156,10 @@ The current bootstrap command installs the first K3s Server with embedded etcd, 
 ~/.kube/kadm/home-prod.yaml
 ```
 
-Base component installation includes Gateway API CRDs, Cilium, Argo CD, and Argo Rollouts. These components do not require GitHub or image registry credentials.
-The preferred install path is offline-first: `prepare-assets` runs on a networked machine, `export-assets` creates a portable asset bundle, `import-assets` restores it on the installer machine, and `bootstrap` consumes only `~/.kadm/cache`. The installer pins Gateway API `v1.5.1` experimental assets, Argo CD `v3.4.4`, Argo Rollouts `v1.9.0`, and Cilium `1.19.5`. The Gateway API experimental bundle is intentional because Cilium Gateway support still expects `TLSRoute v1alpha2`. If network access fails while preparing assets, fix that before creating the bundle; the cluster install should not proceed with ad-hoc live downloads.
+Base component installation includes Gateway API CRDs, Cilium, Argo CD, and Argo Rollouts. These components do not require GitHub or image registry credentials after the offline bundle is imported.
+The preferred install path is offline-first: `install-kadm.sh prepare` downloads the published `kadm-platform-assets.tgz`, restores bundled repositories, imports cached assets, and installs local helper tools. `install-kadm.sh deploy` then consumes only `~/.kadm/cache`, installs K3s, imports platform runtime images into K3s containerd, and installs platform components. The bundle pins Gateway API `v1.5.1` experimental assets, Argo CD `v3.4.4`, Argo Rollouts `v1.9.0`, and Cilium `1.19.5`. The Gateway API experimental bundle is intentional because Cilium Gateway support still expects `TLSRoute v1alpha2`.
+
+Manual `kadmctl prepare-assets`, `export-assets`, and `import-assets` remain available for custom bundles, but the normal server bootstrap should use the published `bundle-latest` release asset.
 
 Kubernetes API operations still go through the SSH tunnel. The installer bounds `kubectl` calls with `--request-timeout=30s` and retries idempotent apply/delete/wait operations so transient tunnel failures surface as retries or clear installer failures instead of hung terminal sessions.
 
