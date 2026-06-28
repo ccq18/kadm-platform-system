@@ -1423,6 +1423,25 @@ $(sed 's/^/    /' "${lua_file}")
 YAML
 }
 
+emit_apps_gateway_yaml() {
+  cat <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: apps-gateway
+  namespace: apps
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+YAML
+}
+
 apply_argocd_rollout_health_customization() {
   local kubeconfig_path="$1"
   local patch_file status
@@ -2345,6 +2364,7 @@ cmd_configure_delivery() {
     create_namespace_if_missing "${KUBECONFIG_PATH}" argocd
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
     apply_argocd_rollout_health_customization "${KUBECONFIG_PATH}"
+    emit_apps_gateway_yaml | apply_delivery_yaml "${KUBECONFIG_PATH}"
 
     emit_onecd_secret_yaml "${ONECD_GITHUB_TOKEN}" "${argocd_token}" "${argocd_base_url}" "${CLUSTER_NAME}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
