@@ -862,7 +862,8 @@ STUB
   assert_file_contains "${stdin_file}" "name: kadm-release-console"
   assert_file_contains "${stdin_file}" "name: demo-hello"
   assert_file_contains "${stdin_file}" "name: demo-hello-spring"
-  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-release-console.git"
+  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-platform-system.git"
+  assert_file_contains "${stdin_file}" "path: console/k8s/overlays/prod"
   assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-app-configs.git"
   assert_file_contains "${stdin_file}" "path: apps/demo-hello/overlays/prod"
   assert_file_contains "${stdin_file}" "path: apps/demo-hello-spring/overlays/prod"
@@ -892,7 +893,7 @@ if [[ "${1:-}" == "-C" ]]; then
   shift 2
 fi
 if [[ "${1:-}" == "config" ]]; then
-  printf 'git@github.com:ccq18/kadm-release-console.git\n'
+  printf 'git@github.com:ccq18/kadm-platform-system.git\n'
 fi
 exit 0
 STUB
@@ -904,7 +905,7 @@ STUB
   assert_contains "${output}" "DRY RUN: KADM release console release will not be triggered"
   assert_contains "${output}" "repo dir: ${tmp_onecd}"
   assert_contains "${output}" "image: ghcr.io/ccq18/kadm-release-console:test-123"
-  assert_contains "${output}" "workflow: build-and-publish.yaml"
+  assert_contains "${output}" "workflow: build-release-console.yaml"
   assert_contains "${output}" "ref: main"
   assert_contains "${output}" "updates overlay: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
 }
@@ -936,7 +937,7 @@ if [[ "${1:-}" == "-C" ]]; then
 fi
 case "${1:-}" in
   config)
-    printf 'git@github.com:ccq18/kadm-release-console.git\n'
+    printf 'git@github.com:ccq18/kadm-platform-system.git\n'
     ;;
   diff)
     exit 0
@@ -990,8 +991,8 @@ STUB
   assert_contains "${output}" "updated overlay from git: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
   assert_file_contains "${calls_file}" "git -C ${tmp_onecd} config --get remote.origin.url"
   assert_file_contains "${calls_file}" "git -C ${tmp_onecd} fetch origin main --quiet"
-  assert_file_contains "${calls_file}" "gh workflow run build-and-publish.yaml --repo ccq18/kadm-release-console --ref main -f image_tag=test-123"
-  assert_file_contains "${calls_file}" "gh run watch 12345 --repo ccq18/kadm-release-console --exit-status"
+  assert_file_contains "${calls_file}" "gh workflow run build-release-console.yaml --repo ccq18/kadm-platform-system --ref main -f image_tag=test-123"
+  assert_file_contains "${calls_file}" "gh run watch 12345 --repo ccq18/kadm-platform-system --exit-status"
   assert_file_contains "${calls_file}" "git -C ${tmp_onecd} pull --ff-only origin main"
 }
 
@@ -1019,7 +1020,7 @@ if [[ "${1:-}" == "-C" ]]; then
 fi
 case "${1:-}" in
   config)
-    printf 'git@github.com:ccq18/kadm-release-console.git\n'
+    printf 'git@github.com:ccq18/kadm-platform-system.git\n'
     ;;
   diff)
     exit 1
@@ -1060,7 +1061,7 @@ if [[ "${1:-}" == "-C" ]]; then
   shift 2
 fi
 if [[ "${1:-}" == "config" ]]; then
-  printf 'git@github.com:ccq18/kadm-release-console.git\n'
+  printf 'git@github.com:ccq18/kadm-platform-system.git\n'
 fi
 exit 0
 STUB
@@ -1300,7 +1301,6 @@ test_import_assets_restores_complete_bundle_metadata() {
   printf 'quay.io/argoproj/argocd:v3.4.4\n' > "${src_dir}/bundle/cache/images/runtime-images.txt"
   printf 'checksum\n' > "${src_dir}/bundle/cache/images/runtime-images.sha256"
   printf 'system\n' > "${src_dir}/bundle/cache/repos/kadm-platform-system.tgz"
-  printf 'console\n' > "${src_dir}/bundle/cache/repos/kadm-release-console.tgz"
   printf 'apps\n' > "${src_dir}/bundle/cache/repos/kadm-app-configs.tgz"
   cat > "${src_dir}/bundle/metadata/offline-bundle.env" <<'ENV'
 KADM_OFFLINE_BUNDLE_FORMAT=2

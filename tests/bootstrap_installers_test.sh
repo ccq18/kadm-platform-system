@@ -35,19 +35,17 @@ make_repo_archive() {
   local calls_file="$3"
   local tmp
   tmp="$(mktemp -d)"
-  mkdir -p "${tmp}/${repo_name}/bin" "${tmp}/${repo_name}/k8s/overlays/prod" "${tmp}/${repo_name}/apps"
+  mkdir -p "${tmp}/${repo_name}/bin" "${tmp}/${repo_name}/apps"
 
   if [[ "${repo_name}" == "kadm-platform-system" ]]; then
+    mkdir -p "${tmp}/${repo_name}/console/k8s/overlays/prod"
     cat > "${tmp}/${repo_name}/bin/kadmctl" <<STUB
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'kadmctl %s\n' "\$*" >> "${calls_file}"
 STUB
     chmod +x "${tmp}/${repo_name}/bin/kadmctl"
-  fi
-
-  if [[ "${repo_name}" == "kadm-release-console" ]]; then
-    printf 'resources: []\n' > "${tmp}/${repo_name}/k8s/overlays/prod/kustomization.yaml"
+    printf 'resources: []\n' > "${tmp}/${repo_name}/console/k8s/overlays/prod/kustomization.yaml"
   fi
 
   if [[ "${repo_name}" == "kadm-app-configs" ]]; then
@@ -69,7 +67,6 @@ test_server_prepare_downloads_workspace_and_imports_assets() {
   mkdir -p "${archives_dir}"
 
   make_repo_archive "${archives_dir}/kadm-platform-system.tgz" "kadm-platform-system" "${calls_file}"
-  make_repo_archive "${archives_dir}/kadm-release-console.tgz" "kadm-release-console" "${calls_file}"
   make_repo_archive "${archives_dir}/kadm-app-configs.tgz" "kadm-app-configs" "${calls_file}"
   printf 'bundle\n' > "${bundle_file}"
 
@@ -96,9 +93,6 @@ case "\${url}" in
     ;;
   *"/kadm-platform-system/"*)
     cp "${archives_dir}/kadm-platform-system.tgz" "\${output}"
-    ;;
-  *"/kadm-release-console/"*)
-    cp "${archives_dir}/kadm-release-console.tgz" "\${output}"
     ;;
   *"/kadm-app-configs/"*)
     cp "${archives_dir}/kadm-app-configs.tgz" "\${output}"
@@ -137,7 +131,6 @@ test_server_prepare_restores_workspace_from_offline_bundle_repos() {
   mkdir -p "${archives_dir}" "${bundle_dir}/cache/repos" "${bundle_dir}/metadata"
 
   make_repo_archive "${bundle_dir}/cache/repos/kadm-platform-system.tgz" "kadm-platform-system" "${calls_file}"
-  make_repo_archive "${bundle_dir}/cache/repos/kadm-release-console.tgz" "kadm-release-console" "${calls_file}"
   make_repo_archive "${bundle_dir}/cache/repos/kadm-app-configs.tgz" "kadm-app-configs" "${calls_file}"
   cat > "${bundle_dir}/metadata/offline-bundle.env" <<'ENV'
 KADM_OFFLINE_BUNDLE_FORMAT=2
@@ -184,7 +177,7 @@ STUB
   assert_file_contains "${calls_file}" "kadmctl import-assets ${tmp_root}/bootstrap/downloads/kadm-platform-assets.tgz"
   assert_file_contains "${calls_file}" "kadmctl install-tools --apply"
   [[ -x "${tmp_root}/bootstrap/workspace/kadm-platform-system/bin/kadmctl" ]] || fail "prepare did not restore system repo"
-  [[ -f "${tmp_root}/bootstrap/workspace/kadm-release-console/k8s/overlays/prod/kustomization.yaml" ]] || fail "prepare did not restore release console repo"
+  [[ -f "${tmp_root}/bootstrap/workspace/kadm-platform-system/console/k8s/overlays/prod/kustomization.yaml" ]] || fail "prepare did not restore release console from system repo"
   [[ -f "${tmp_root}/bootstrap/workspace/kadm-app-configs/apps/apps.json" ]] || fail "prepare did not restore app configs repo"
   if grep -Fq "api.github.com" "${calls_file}"; then
     fail "prepare downloaded GitHub repos despite bundled repo archives"
@@ -197,7 +190,7 @@ test_server_deploy_calls_local_deploy_and_configure_delivery() {
   tmp_root="$(mktemp -d)"
   calls_file="${tmp_root}/calls.log"
   system_dir="${tmp_root}/bootstrap/workspace/kadm-platform-system"
-  release_dir="${tmp_root}/bootstrap/workspace/kadm-release-console"
+  release_dir="${system_dir}/console"
   app_dir="${tmp_root}/bootstrap/workspace/kadm-app-configs"
 
   mkdir -p "${system_dir}/bin" "${release_dir}/k8s/overlays/prod" "${app_dir}/apps"

@@ -31,8 +31,9 @@ bootstrap_root="${KADM_BOOTSTRAP_ROOT:-/opt/kadm}"
 github_owner="${KADM_GITHUB_OWNER:-ccq18}"
 system_repo="${KADM_SYSTEM_REPO:-kadm-platform-system}"
 system_ref="${KADM_SYSTEM_REF:-main}"
-release_console_repo="${KADM_RELEASE_CONSOLE_REPO:-kadm-release-console}"
-release_console_ref="${KADM_RELEASE_CONSOLE_REF:-main}"
+legacy_release_console_repo="kadm-release-console"
+# Last standalone console commit before the code moved into kadm-platform-system/console.
+legacy_release_console_ref="44090c49a4bf799904eb328d792eb9c9c1c5ecd1"
 app_configs_repo="${KADM_APP_CONFIGS_REPO:-kadm-app-configs}"
 app_configs_ref="${KADM_APP_CONFIGS_REF:-main}"
 assets_repo="${KADM_PLATFORM_ASSETS_REPO:-kadm-platform-assets}"
@@ -88,7 +89,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 system_dir="${workspace_root}/${system_repo}"
-release_console_dir="${workspace_root}/${release_console_repo}"
+release_console_dir="${system_dir}/console"
+legacy_release_console_dir="${workspace_root}/${legacy_release_console_repo}"
 app_configs_dir="${workspace_root}/${app_configs_repo}"
 bundle_path="${download_root}/kadm-platform-assets.tgz"
 
@@ -238,8 +240,10 @@ restore_workspace_from_bundle() {
   require_command find
 
   restore_repo_archive_from_bundle "${bundle}" "${system_repo}" "${system_dir}" || return 1
-  restore_repo_archive_from_bundle "${bundle}" "${release_console_repo}" "${release_console_dir}" || return 1
   restore_repo_archive_from_bundle "${bundle}" "${app_configs_repo}" "${app_configs_dir}" || return 1
+  if [[ ! -d "${release_console_dir}/k8s/overlays/prod" ]]; then
+    restore_repo_archive_from_bundle "${bundle}" "${legacy_release_console_repo}" "${legacy_release_console_dir}" || true
+  fi
   info "Restored workspace repositories from offline asset bundle"
 }
 
@@ -252,10 +256,24 @@ ensure_workspace() {
 
   info "Downloading ${system_repo}@${system_ref}"
   download_repo_archive "${system_repo}" "${system_ref}" "${system_dir}"
-  info "Downloading ${release_console_repo}@${release_console_ref}"
-  download_repo_archive "${release_console_repo}" "${release_console_ref}" "${release_console_dir}"
+  if [[ ! -d "${release_console_dir}/k8s/overlays/prod" ]]; then
+    info "Downloading legacy ${legacy_release_console_repo}@${legacy_release_console_ref}"
+    download_repo_archive "${legacy_release_console_repo}" "${legacy_release_console_ref}" "${legacy_release_console_dir}"
+  fi
   info "Downloading ${app_configs_repo}@${app_configs_ref}"
   download_repo_archive "${app_configs_repo}" "${app_configs_ref}" "${app_configs_dir}"
+}
+
+resolve_release_console_dir() {
+  if [[ -d "${release_console_dir}/k8s/overlays/prod" ]]; then
+    printf '%s\n' "${release_console_dir}"
+    return 0
+  fi
+  if [[ -d "${legacy_release_console_dir}/k8s/overlays/prod" ]]; then
+    printf '%s\n' "${legacy_release_console_dir}"
+    return 0
+  fi
+  return 1
 }
 
 install_local_kadmctl() {
@@ -287,7 +305,8 @@ prepare_phase() {
 
 deploy_phase() {
   [[ -x "${system_dir}/bin/kadmctl" ]] || die "missing ${system_dir}/bin/kadmctl; run prepare first"
-  [[ -d "${release_console_dir}/k8s/overlays/prod" ]] || die "missing release console overlay at ${release_console_dir}/k8s/overlays/prod"
+  local active_release_console_dir
+  active_release_console_dir="$(resolve_release_console_dir)" || die "missing release console overlay at ${release_console_dir}/k8s/overlays/prod"
   [[ -f "${app_configs_dir}/apps/apps.json" ]] || die "missing app configs at ${app_configs_dir}/apps/apps.json"
   [[ -n "${access_host}" ]] || die "deploy requires --access-host <ssh-target>"
   [[ -n "${KADM_GITHUB_TOKEN:-}" ]] || die "deploy requires KADM_GITHUB_TOKEN in the environment"
@@ -322,7 +341,7 @@ deploy_phase() {
     KADM_GHCR_USERNAME="${KADM_GHCR_USERNAME:-}" \
     KADM_GHCR_TOKEN="${KADM_GHCR_TOKEN:-}" \
     "${system_dir}/bin/kadmctl" configure-delivery "${cluster_name}" \
-      --onecd-overlay "${release_console_dir}/k8s/overlays/prod" \
+      --onecd-overlay "${active_release_console_dir}/k8s/overlays/prod" \
       --app-configs-dir "${app_configs_dir}" \
       --apply
 

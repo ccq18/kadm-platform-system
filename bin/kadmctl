@@ -27,7 +27,7 @@ LEGACY_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/latest/d
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KADM_SYSTEM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_PARENT="$(cd "${KADM_SYSTEM_ROOT}/.." && pwd)"
-DEFAULT_ONECD_OVERLAY="${WORKSPACE_PARENT}/kadm-release-console/k8s/overlays/prod"
+DEFAULT_ONECD_OVERLAY="${KADM_SYSTEM_ROOT}/console/k8s/overlays/prod"
 DEFAULT_APP_CONFIGS_DIR="${WORKSPACE_PARENT}/kadm-app-configs"
 DEFAULT_HELM_VERSION="v3.15.4"
 HELM_BIN=""
@@ -589,7 +589,6 @@ cmd_import_assets() {
     [[ -s "$(runtime_images_list_path)" ]] || die "complete offline bundle missing $(runtime_images_list_path)"
     [[ -s "$(runtime_images_checksum_path)" ]] || die "complete offline bundle missing $(runtime_images_checksum_path)"
     [[ -s "$(repo_cache_dir)/kadm-platform-system.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-platform-system.tgz"
-    [[ -s "$(repo_cache_dir)/kadm-release-console.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-release-console.tgz"
     [[ -s "$(repo_cache_dir)/kadm-app-configs.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-app-configs.tgz"
     info "offline bundle mode: complete"
   else
@@ -1781,7 +1780,7 @@ cmd_publish_release_console() {
   local image="ghcr.io/ccq18/kadm-release-console"
   local tag=""
   local ref="main"
-  local workflow="build-and-publish.yaml"
+  local workflow="build-release-console.yaml"
   local apply=0
 
   while [[ $# -gt 0 ]]; do
@@ -2584,9 +2583,9 @@ cmd_configure_delivery() {
     emit_onecd_secret_yaml "${ONECD_GITHUB_TOKEN}" "${argocd_token}" "${argocd_base_url}" "${CLUSTER_NAME}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-source-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_repo_secret_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_repo_secret_yaml kadm-platform-system "https://github.com/ccq18/kadm-platform-system.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml kadm-app-configs "https://github.com/ccq18/kadm-app-configs.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-release-console.git" kadm "k8s/overlays/prod" "main" "system" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-platform-system.git" kadm "console/k8s/overlays/prod" "main" "system" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     while IFS=$'\t' read -r registry_name app_name gitops_owner gitops_repo gitops_path gitops_ref rollout_namespace; do
       [[ -n "${app_name}" ]] || continue
       printf '%s\n' "${app_name}" >> "${desired_apps_file}"

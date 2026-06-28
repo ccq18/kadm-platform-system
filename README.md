@@ -1,195 +1,222 @@
 # KADM Platform System
 
-This repository contains the local automation skeleton for the fixed growth path:
+KADM Platform System 是首台服务器安装、客户端初始化和 Day-2 运维的主入口。它负责把平台离线资源导入本地缓存，并用 `kadmctl` 安装 K3s、Cilium、Gateway API、Argo CD、Argo Rollouts 和 KADM Release Console。
 
-```text
-1 Server
--> 3 Server HA
--> 3 Server + N Worker
-```
+## 仓库边界
 
-The first implementation slice is intentionally conservative. Files here define configuration contracts and templates only. Runtime scripts added in later tasks must default to `DRY_RUN=1`; any command that changes a remote host or cluster must require an explicit `--apply`.
-
-## Safety Rules
-
-- Do not commit real secrets, kubeconfig files, SSH private keys, K3s server tokens, database passwords, object-storage keys, or GitHub tokens.
-- 示例配置只保留占位符，不包含真实密钥；真实值必须放在密钥管理系统或本地忽略文件中。
-- Use `config/cluster.env.example` as a template and keep real values in an ignored local file.
-- Treat single-node mode as a starting point, not high availability.
-- Treat two-server mode as a temporary `1 -> 3` upgrade state, not a supported long-term topology.
-- Keep Cilium as the fixed default self-hosted network implementation for the first version.
-- Do not expose CNI, service dataplane, Gateway controller, or IPAM choices to ordinary users.
-
-## Files
-
-| Path | Purpose |
+| 仓库 | 职责 |
 | --- | --- |
-| `config/cluster.env.example` | Example ClusterSpec input. It contains placeholders only and does not include real secrets. |
-| `templates/k3s-server-config.yaml` | Default K3s Server configuration template for the self-hosted path. |
-| `templates/cilium-values.yaml` | Default Cilium Helm values template for the self-hosted path. |
+| `kadm-platform-system` | 安装脚本、`kadmctl`、平台组件部署、运维命令，以及 `console/` 下的 Release Console 源码和部署 overlay |
+| `kadm-platform-assets` | 平台离线资源包构建和 Release 发布 |
+| `kadm-app-configs` | 应用 GitOps 配置和应用注册表 |
+| 应用仓库 | 只负责源码、测试、镜像构建和推送 |
 
-## Default Growth Path
+平台离线包不包含业务应用镜像。业务应用完全离线分发以后应独立设计应用镜像包。
 
-The self-hosted path starts with one K3s Server using embedded etcd from day one:
+## 服务器安装
 
-```text
-ECS-1
-├── K3s Server
-├── single-member embedded etcd
-├── Cilium Agent
-├── Cilium Gateway
-├── platform components
-└── application Pods
-```
-
-Later, the platform upgrades the cluster to three Servers in one controlled operation:
-
-```text
-ECS-1 / ECS-2 / ECS-3
-├── K3s Server
-├── embedded etcd
-├── Cilium Agent
-├── Cilium Gateway
-├── platform components
-└── application Pods
-```
-
-After three Servers, normal capacity expansion adds Agent Workers rather than more etcd members.
-
-## Execution Policy
-
-Later scripts under `bin/` must follow this policy:
-
-```text
-default: DRY_RUN=1
-real changes: require --apply
-```
-
-Examples:
+默认安装会下载最新平台离线包：
 
 ```bash
-# Safe planning mode
-bin/install-single-server.sh --env config/cluster.env.example --dry-run
+export KADM_GITHUB_TOKEN=<github-token>
 
-# Real execution, only after reviewing the plan
-bin/install-single-server.sh --env /secure/path/cluster.env --apply
-```
-
-The `--apply` mode must not be added casually. It must print the target host, cluster id, operation type, and expected blast radius before running any remote command.
-
-## Local Installer
-
-`bin/kadmctl` provides the first local installer workflow.
-
-Day-0 entrypoints are now the bootstrap scripts under [`bootstrap/`](/Users/lrd/mnt/homepc/data/homepcdata/kadm-platform-system/bootstrap):
-
-```bash
-# On the first server. This downloads the latest platform offline bundle by default.
 curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm.sh | \
   bash -s -- all \
-    --cluster home-prod \
-    --access-host root@203.0.113.11 \
-    --private-ip 10.0.0.11
-
-# On the operator laptop.
-curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm-client.sh | \
-  bash -s -- --cluster home-prod --server root@203.0.113.11
+    --cluster kadm-test \
+    --access-host root@<public-ip> \
+    --private-ip <private-ip> \
+    --dns-upstream 1.1.1.1 \
+    --dns-upstream 8.8.8.8
 ```
 
-The default server installer bundle is:
+默认资源包：
 
 - Release page: <https://github.com/ccq18/kadm-platform-assets/releases/tag/bundle-latest>
 - Stable asset URL: <https://github.com/ccq18/kadm-platform-assets/releases/download/bundle-latest/kadm-platform-assets.tgz>
 
-Override the bundle source when testing a different build:
+如果执行安装脚本的服务器本地已有资源包：
 
 ```bash
-export KADM_ASSET_BUNDLE_URL=https://github.com/ccq18/kadm-platform-assets/releases/download/bundle-latest/kadm-platform-assets.tgz
+export KADM_ASSET_BUNDLE_URL=file:///opt/kadm/kadm-platform-assets.tgz
+export KADM_GITHUB_TOKEN=<github-token>
 
 curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm.sh | \
-  bash -s -- prepare
+  bash -s -- all \
+    --cluster kadm-test \
+    --access-host root@<public-ip> \
+    --private-ip <private-ip>
 ```
 
-`install-kadm.sh` splits first install into:
+`KADM_ASSET_BUNDLE_URL` 支持 `https://...` 和 `file://...`。`file://` 路径必须是服务器上的绝对路径。
 
-- `prepare`: download repos, import the offline bundle, install local helper tools
-- `deploy`: install local K3s, install platform components, configure release-console delivery
-- `all`: run both phases
+## 安装阶段
 
-`kadmctl` remains the day-2 tool after bootstrap.
+| 阶段 | 行为 |
+| --- | --- |
+| `prepare` | 下载或读取 `kadm-platform-assets.tgz`，恢复 bundle 内的 KADM 仓库，导入 `~/.kadm/cache`，安装本地工具 |
+| `deploy` | 使用本地缓存安装 K3s 和平台组件，导入 platform runtime images 到 K3s containerd，配置 Release Console 和 GitOps |
+| `all` | 先执行 `prepare`，再执行 `deploy` |
 
-Bootstrap always starts from one empty server:
+`prepare` 是离线优先准备阶段。`deploy/all` 仍需要 `KADM_GITHUB_TOKEN`，因为 Release Console 需要 GitHub Actions、仓库内容和 GHCR 访问能力。不要把 token 写进命令参数或提交到仓库。
+
+## 客户端初始化
+
+在操作员本机执行：
 
 ```bash
-# Install local helper tools through the installer, not by ad-hoc terminal commands.
-bin/kadmctl install-tools --apply
-
-# Prepare pinned installer assets through the installer before any cluster changes.
-bin/kadmctl prepare-assets --dry-run
-bin/kadmctl prepare-assets --apply
-bin/kadmctl export-assets --output kadm-platform-assets.tgz
-
-# On an offline/local installer machine, import the prepared bundle.
-bin/kadmctl import-assets kadm-platform-assets.tgz
-
-# Destructive node cleanup is also script-managed and defaults to dry-run.
-bin/kadmctl reset-node root@1.2.3.4 --dry-run
-bin/kadmctl reset-node root@1.2.3.4 --apply
-
-# Preview only. This is the default safety mode.
-bin/kadmctl bootstrap root@1.2.3.4 \
-  --name home-prod \
-  --private-ip 10.0.0.11 \
-  --dry-run
-
-# Real first-node install. This changes the remote host.
-bin/kadmctl bootstrap root@1.2.3.4 \
-  --name home-prod \
-  --private-ip 10.0.0.11 \
-  --apply
+curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm-client.sh | \
+  bash -s -- \
+    --cluster kadm-test \
+    --server root@<public-ip>
 ```
 
-The current bootstrap command installs the first K3s Server with embedded etcd, retrieves kubeconfig, rewrites it to a local tunnel endpoint, installs the base platform components, and writes:
+脚本会安装 `kadmctl` 并写入：
 
 ```text
-~/.kadm/clusters/home-prod/cluster.env
-~/.kube/kadm/home-prod.yaml
+~/.kadm/clusters/kadm-test/cluster.env
+~/.kube/kadm/kadm-test.yaml
+~/.local/bin/kadmctl
 ```
 
-Base component installation includes Gateway API CRDs, Cilium, Argo CD, and Argo Rollouts. These components do not require GitHub or image registry credentials after the offline bundle is imported.
-The preferred install path is offline-first: `install-kadm.sh prepare` downloads the published `kadm-platform-assets.tgz`, restores bundled repositories, imports cached assets, and installs local helper tools. `install-kadm.sh deploy` then consumes only `~/.kadm/cache`, installs K3s, imports platform runtime images into K3s containerd, and installs platform components. The bundle pins Gateway API `v1.5.1` experimental assets, Argo CD `v3.4.4`, Argo Rollouts `v1.9.0`, and Cilium `1.19.5`. The Gateway API experimental bundle is intentional because Cilium Gateway support still expects `TLSRoute v1alpha2`.
-
-Manual `kadmctl prepare-assets`, `export-assets`, and `import-assets` remain available for custom bundles, but the normal server bootstrap should use the published `bundle-latest` release asset.
-
-Kubernetes API operations still go through the SSH tunnel. The installer bounds `kubectl` calls with `--request-timeout=30s` and retries idempotent apply/delete/wait operations so transient tunnel failures surface as retries or clear installer failures instead of hung terminal sessions.
-
-Configure delivery credentials after bootstrap:
+## 访问控制台
 
 ```bash
-# Optional, when triggering a KADM release console build through GitHub Actions.
-export KADM_GITHUB_TOKEN=<github-token>
-bin/kadmctl publish-release-console --tag <image-tag> --apply
+~/.local/bin/kadmctl connect kadm-test
+```
 
-export KADM_GITHUB_TOKEN=<new-token>
+然后打开：
+
+```text
+http://127.0.0.1:18080
+```
+
+`connect` 会在前台保持 SSH tunnel 和 `kubectl port-forward`。控制台不默认暴露公网。
+
+## 常用 Day-2 命令
+
+```bash
+# 查看集群状态
+kadmctl status kadm-test
+
+# 清理节点，默认建议先 dry-run
+kadmctl reset-node root@<host> --dry-run
+kadmctl reset-node root@<host> --apply
+
+# 发布/更新 Release Console 镜像
+export KADM_GITHUB_TOKEN=<github-token>
+kadmctl publish-release-console --tag <image-tag> --apply
+
+# 重新配置交付凭据和应用注册表
+export KADM_GITHUB_TOKEN=<github-token>
 export KADM_GHCR_USERNAME=<github-user>
 export KADM_GHCR_TOKEN=<ghcr-token>
-
-bin/kadmctl configure-delivery home-prod --app-configs-dir /path/to/kadm-app-configs --apply
+kadmctl configure-delivery kadm-test --app-configs-dir /path/to/kadm-app-configs --apply
 ```
 
-`publish-release-console` triggers the `kadm-release-console` GitHub Actions workflow, waits for it to finish, and fast-forwards the local repo so the overlay tag matches the build output. `configure-delivery` reads secrets from environment variables, generates an Argo CD session token when `KADM_ARGOCD_TOKEN` is not provided, applies Kubernetes Secrets through transient local manifests so failed API calls can be retried, configures Argo CD repository credentials for `kadm-release-console` and `kadm-app-configs`, injects `kadm-app-configs/apps/apps.json` into the `kadm-apps-config` ConfigMap, includes the K3s join token from the local bootstrap profile, and deploys the KADM release console Kustomize overlay. `KADM_*` environment variables are the preferred interface; `ONECD_*` names remain supported as compatibility aliases. Do not pass tokens as command-line arguments.
+`KADM_*` 是当前环境变量接口。`ONECD_*` 仅作为迁移兼容别名保留。
 
-Access the platform through an SSH tunnel instead of exposing the Kubernetes API publicly:
+## 离线资源内容
+
+当前平台离线包包含：
+
+- K3s install script、binary 和 airgap image bundle
+- Helm archive
+- Gateway API experimental manifest
+- Argo CD install manifest
+- Argo Rollouts install manifest
+- Cilium chart
+- 平台组件运行镜像，包括 Cilium、Argo CD、Argo Rollouts 和 KADM Release Console
+- `kadm-platform-system` 仓库归档，包含 `console/`
+- `kadm-app-configs` 仓库归档
+
+业务应用镜像不包含在该 bundle 中。
+
+---
+
+# KADM Platform System
+
+KADM Platform System is the main entrypoint for first-server installation, local client setup, and Day-2 operations. It imports the offline platform bundle into local cache and uses `kadmctl` to install K3s, Cilium, Gateway API, Argo CD, Argo Rollouts, and KADM Release Console.
+
+## Repository Boundaries
+
+| Repository | Responsibility |
+| --- | --- |
+| `kadm-platform-system` | Installer scripts, `kadmctl`, platform component deployment, operations commands, and Release Console source/deployment overlay under `console/` |
+| `kadm-platform-assets` | Offline platform bundle build and Release publishing |
+| `kadm-app-configs` | Application GitOps configuration and app registry |
+| Application repositories | Source code, tests, image build, and image push only |
+
+The platform offline bundle does not include business application images. Fully offline business application distribution should be designed as a separate application image bundle.
+
+## Server Install
+
+The default install downloads the latest platform offline bundle:
 
 ```bash
-bin/kadmctl connect home-prod
+export KADM_GITHUB_TOKEN=<github-token>
+
+curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm.sh | \
+  bash -s -- all \
+    --cluster kadm-test \
+    --access-host root@<public-ip> \
+    --private-ip <private-ip> \
+    --dns-upstream 1.1.1.1 \
+    --dns-upstream 8.8.8.8
 ```
 
-When the `kadm` Service exists, `connect` starts:
+Default bundle:
+
+- Release page: <https://github.com/ccq18/kadm-platform-assets/releases/tag/bundle-latest>
+- Stable asset URL: <https://github.com/ccq18/kadm-platform-assets/releases/download/bundle-latest/kadm-platform-assets.tgz>
+
+If the bundle already exists on the server that runs the installer:
+
+```bash
+export KADM_ASSET_BUNDLE_URL=file:///opt/kadm/kadm-platform-assets.tgz
+export KADM_GITHUB_TOKEN=<github-token>
+
+curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm.sh | \
+  bash -s -- all \
+    --cluster kadm-test \
+    --access-host root@<public-ip> \
+    --private-ip <private-ip>
+```
+
+`KADM_ASSET_BUNDLE_URL` supports `https://...` and `file://...`. A `file://` path must be an absolute path on the server.
+
+## Install Phases
+
+| Phase | Behavior |
+| --- | --- |
+| `prepare` | Downloads or reads `kadm-platform-assets.tgz`, restores bundled KADM repositories, imports `~/.kadm/cache`, and installs local tools |
+| `deploy` | Uses local cache to install K3s and platform components, imports platform runtime images into K3s containerd, and configures Release Console and GitOps |
+| `all` | Runs `prepare`, then `deploy` |
+
+`prepare` is the offline-first preparation phase. `deploy/all` still require `KADM_GITHUB_TOKEN` because Release Console needs GitHub Actions, repository content, and GHCR access. Do not pass tokens as command-line arguments or commit them to Git.
+
+## Local Client Setup
+
+Run on the operator machine:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/bootstrap/install-kadm-client.sh | \
+  bash -s -- \
+    --cluster kadm-test \
+    --server root@<public-ip>
+```
+
+The script installs `kadmctl` and writes:
 
 ```text
-127.0.0.1:16443 -> first-master:6443
-127.0.0.1:18080 -> svc/kadm:80
+~/.kadm/clusters/kadm-test/cluster.env
+~/.kube/kadm/kadm-test.yaml
+~/.local/bin/kadmctl
+```
+
+## Console Access
+
+```bash
+~/.local/bin/kadmctl connect kadm-test
 ```
 
 Then open:
@@ -198,20 +225,23 @@ Then open:
 http://127.0.0.1:18080
 ```
 
-Keep the command running while using the console. Press `Ctrl-C` to stop the tunnel and port-forward.
+`connect` keeps the SSH tunnel and `kubectl port-forward` in the foreground. The console is not exposed publicly by default.
 
-## Template Variables
+## Common Day-2 Commands
 
-The templates use shell-style placeholders such as `${CLUSTER_CIDR}` and `${SERVICE_CIDR}`. Later tasks will add rendering and validation scripts. Until then, these templates are design contracts, not directly applied manifests.
+```bash
+kadmctl status kadm-test
 
-## Secret Handling
+kadmctl reset-node root@<host> --dry-run
+kadmctl reset-node root@<host> --apply
 
-`cluster.env.example` intentionally uses placeholder references:
+export KADM_GITHUB_TOKEN=<github-token>
+kadmctl publish-release-console --tag <image-tag> --apply
 
-```text
-K3S_TOKEN_SECRET_REF=secret://example/k3s-token
-BACKUP_ACCESS_KEY_REF=secret://example/object-storage-access-key
-BACKUP_SECRET_KEY_REF=secret://example/object-storage-secret-key
+export KADM_GITHUB_TOKEN=<github-token>
+export KADM_GHCR_USERNAME=<github-user>
+export KADM_GHCR_TOKEN=<ghcr-token>
+kadmctl configure-delivery kadm-test --app-configs-dir /path/to/kadm-app-configs --apply
 ```
 
-Real secret values must live in a secret manager or an ignored local file, never in this repository.
+`KADM_*` is the current environment variable interface. `ONECD_*` names remain only as migration compatibility aliases.
