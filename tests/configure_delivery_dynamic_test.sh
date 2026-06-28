@@ -112,11 +112,19 @@ if [[ "$*" == *"apply -f "* ]]; then
   cat "${file}" >> "${ONECDCTL_TEST_STDIN}"
   exit 0
 fi
+if [[ "$*" == *"patch configmap argocd-cm"* && "$*" == *"--patch-file"* ]]; then
+  cat "${@: -1}" >> "${ONECDCTL_TEST_STDIN}"
+  exit 0
+fi
 if [[ "$*" == *"apply -k "* ]]; then
   exit 0
 fi
 if [[ "$*" == *"get applications"* && "$*" == *"jsonpath"* ]]; then
   printf 'legacy-one\n'
+  exit 0
+fi
+if [[ "$*" == *"get statefulset argocd-application-controller"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
   exit 0
 fi
 if [[ "$*" == *"get deploy kadm"* && "$*" == *"jsonpath"* ]]; then
@@ -143,6 +151,8 @@ STUB
   assert_file_contains "${stdin_file}" "name: beta"
   assert_file_contains "${stdin_file}" "namespace: beta-space"
   assert_file_contains "${stdin_file}" "name: kadm-source-apps-config"
+  assert_file_contains "${stdin_file}" "resource.customizations.health.argoproj.io_Rollout"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd patch configmap argocd-cm --type merge --patch-file"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd delete application legacy-one --ignore-not-found"
 }
 

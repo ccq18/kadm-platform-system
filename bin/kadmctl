@@ -25,7 +25,8 @@ LEGACY_GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/
 LEGACY_ARGOCD_URL="https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
 LEGACY_ROLLOUTS_URL="https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_PARENT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+KADM_SYSTEM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_PARENT="$(cd "${KADM_SYSTEM_ROOT}/.." && pwd)"
 DEFAULT_ONECD_OVERLAY="${WORKSPACE_PARENT}/kadm-release-console/k8s/overlays/prod"
 DEFAULT_APP_CONFIGS_DIR="${WORKSPACE_PARENT}/kadm-app-configs"
 DEFAULT_HELM_VERSION="v3.15.4"
@@ -1078,6 +1079,31 @@ wait_for_deployment_ready() {
   die "timed out waiting for deployment/${name}"
 }
 
+wait_for_statefulset_ready() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local name="$3"
+  local timeout_seconds="$4"
+  local deadline=$((SECONDS + timeout_seconds))
+  local state ready desired
+
+  while (( SECONDS < deadline )); do
+    state="$(kubectl_for "${kubeconfig_path}" -n "${namespace}" get statefulset "${name}" -o jsonpath='{.status.readyReplicas} {.spec.replicas}' 2>/dev/null || true)"
+    ready="${state%% *}"
+    desired="${state##* }"
+    ready="${ready:-0}"
+    desired="${desired:-0}"
+    if [[ "${desired}" =~ ^[0-9]+$ && "${ready}" =~ ^[0-9]+$ && "${desired}" -gt 0 && "${ready}" -ge "${desired}" ]]; then
+      info "statefulset/${name} ready: ${ready}/${desired}"
+      return 0
+    fi
+    info "waiting for statefulset/${name}: ${ready}/${desired}"
+    sleep 5
+  done
+
+  die "timed out waiting for statefulset/${name}"
+}
+
 allow_gateway_api_experimental_upgrade() {
   local kubeconfig_path="$1"
   local gateway_api_manifest="$2"
@@ -1385,6 +1411,30 @@ apply_delivery_yaml() {
   kubectl_apply_retry "${kubeconfig_path}" -f "${manifest}" || status="$?"
   rm -f "${manifest}"
   return "${status}"
+}
+
+emit_argocd_rollout_health_patch_yaml() {
+  local lua_file="${KADM_SYSTEM_ROOT}/assets/argocd-rollout-health.lua"
+  [[ -f "${lua_file}" ]] || die "Argo Rollout health script not found: ${lua_file}"
+  cat <<YAML
+data:
+  resource.customizations.health.argoproj.io_Rollout: |
+$(sed 's/^/    /' "${lua_file}")
+YAML
+}
+
+apply_argocd_rollout_health_customization() {
+  local kubeconfig_path="$1"
+  local patch_file status
+  patch_file="$(mktemp)"
+  emit_argocd_rollout_health_patch_yaml > "${patch_file}"
+  status=0
+  kubectl_retry "${kubeconfig_path}" -n argocd patch configmap argocd-cm --type merge --patch-file "${patch_file}" || status="$?"
+  rm -f "${patch_file}"
+  [[ "${status}" -eq 0 ]] || return "${status}"
+
+  kubectl_retry "${kubeconfig_path}" -n argocd rollout restart statefulset/argocd-application-controller
+  wait_for_statefulset_ready "${kubeconfig_path}" argocd argocd-application-controller 300
 }
 
 default_onecd_image_tag() {
@@ -2294,6 +2344,7 @@ cmd_configure_delivery() {
     create_namespace_if_missing "${KUBECONFIG_PATH}" kadm
     create_namespace_if_missing "${KUBECONFIG_PATH}" argocd
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
+    apply_argocd_rollout_health_customization "${KUBECONFIG_PATH}"
 
     emit_onecd_secret_yaml "${ONECD_GITHUB_TOKEN}" "${argocd_token}" "${argocd_base_url}" "${CLUSTER_NAME}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"

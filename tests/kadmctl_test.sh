@@ -669,6 +669,14 @@ if [[ "$*" == *"get secret argocd-initial-admin-secret"* ]]; then
   printf 'YWRtaW4tcGFzcw=='
   exit 0
 fi
+if [[ "$*" == *"patch configmap argocd-cm"* && "$*" == *"--patch-file"* ]]; then
+  cat "${@: -1}" >> "${ONECDCTL_TEST_STDIN}"
+  exit 0
+fi
+if [[ "$*" == *"get statefulset argocd-application-controller"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
 if [[ "$*" == *"get deploy kadm"* && "$*" == *"jsonpath"* ]]; then
   printf '1 1'
   exit 0
@@ -715,6 +723,9 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace kadm"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace argocd"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace apps"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd patch configmap argocd-cm --type merge --patch-file"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd rollout restart statefulset/argocd-application-controller"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get statefulset argocd-application-controller -o jsonpath="
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply -k ${tmp_home}/onecd-overlay"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kadm rollout restart deployment/kadm"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kadm get deploy kadm -o jsonpath="
@@ -725,6 +736,7 @@ STUB
   assert_file_contains "${stdin_file}" "K3S_JOIN_SERVER_URL"
   assert_file_contains "${stdin_file}" "K3S_JOIN_TOKEN"
   assert_file_contains "${stdin_file}" "argocd.argoproj.io/secret-type: repository"
+  assert_file_contains "${stdin_file}" "resource.customizations.health.argoproj.io_Rollout"
   assert_file_contains "${stdin_file}" "\"id\": \"demo-hello\""
   assert_file_contains "${stdin_file}" "name: ghcr-cred"
   assert_file_contains "${stdin_file}" "kind: Application"
