@@ -125,6 +125,72 @@ STUB
   [[ -L "${tmp_root}/bin/kadmctl" ]] || fail "prepare did not install kadmctl symlink"
 }
 
+test_server_prepare_restores_workspace_from_offline_bundle_repos() {
+  local tmp_home tmp_root tmp_bin calls_file archives_dir bundle_dir bundle_file
+  tmp_home="$(mktemp -d)"
+  tmp_root="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_root}/calls.log"
+  archives_dir="${tmp_root}/archives"
+  bundle_dir="${tmp_root}/bundle"
+  bundle_file="${archives_dir}/kadm-platform-assets.tgz"
+  mkdir -p "${archives_dir}" "${bundle_dir}/cache/repos" "${bundle_dir}/metadata"
+
+  make_repo_archive "${bundle_dir}/cache/repos/kadm-platform-system.tgz" "kadm-platform-system" "${calls_file}"
+  make_repo_archive "${bundle_dir}/cache/repos/kadm-release-console.tgz" "kadm-release-console" "${calls_file}"
+  make_repo_archive "${bundle_dir}/cache/repos/kadm-app-configs.tgz" "kadm-app-configs" "${calls_file}"
+  cat > "${bundle_dir}/metadata/offline-bundle.env" <<'ENV'
+KADM_OFFLINE_BUNDLE_FORMAT=2
+KADM_OFFLINE_COMPLETE=true
+ENV
+  tar -czf "${bundle_file}" -C "${bundle_dir}" cache metadata
+
+  cat > "${tmp_bin}/curl" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl %s\n' "\$*" >> "${calls_file}"
+output=""
+url=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    -o)
+      output="\${2:-}"
+      shift 2
+      ;;
+    *)
+      url="\$1"
+      shift
+      ;;
+  esac
+done
+case "\${url}" in
+  *"kadm-platform-assets.tgz"*)
+    cp "${bundle_file}" "\${output}"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+STUB
+  chmod +x "${tmp_bin}/curl"
+
+  HOME="${tmp_home}" \
+    KADM_BOOTSTRAP_ROOT="${tmp_root}/bootstrap" \
+    KADM_LOCAL_BIN_DIR="${tmp_root}/bin" \
+    KADM_ASSET_BUNDLE_URL="https://example.invalid/kadm-platform-assets.tgz" \
+    PATH="${tmp_bin}:${PATH}" \
+    bash "${SERVER_INSTALLER}" prepare
+
+  assert_file_contains "${calls_file}" "kadmctl import-assets ${tmp_root}/bootstrap/downloads/kadm-platform-assets.tgz"
+  assert_file_contains "${calls_file}" "kadmctl install-tools --apply"
+  [[ -x "${tmp_root}/bootstrap/workspace/kadm-platform-system/bin/kadmctl" ]] || fail "prepare did not restore system repo"
+  [[ -f "${tmp_root}/bootstrap/workspace/kadm-release-console/k8s/overlays/prod/kustomization.yaml" ]] || fail "prepare did not restore release console repo"
+  [[ -f "${tmp_root}/bootstrap/workspace/kadm-app-configs/apps/apps.json" ]] || fail "prepare did not restore app configs repo"
+  if grep -Fq "api.github.com" "${calls_file}"; then
+    fail "prepare downloaded GitHub repos despite bundled repo archives"
+  fi
+}
+
 test_server_deploy_calls_local_deploy_and_configure_delivery() {
   local tmp_home tmp_root calls_file system_dir release_dir app_dir
   tmp_home="$(mktemp -d)"
@@ -254,6 +320,7 @@ STUB
 }
 
 test_server_prepare_downloads_workspace_and_imports_assets
+test_server_prepare_restores_workspace_from_offline_bundle_repos
 test_server_deploy_calls_local_deploy_and_configure_delivery
 test_client_installer_fetches_profile_and_kubeconfig
 

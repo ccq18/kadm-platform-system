@@ -31,6 +31,19 @@ assert_file_contains() {
   }
 }
 
+assert_file_line_order() {
+  local file="$1"
+  local first="$2"
+  local second="$3"
+  local first_line second_line
+  [[ -f "${file}" ]] || fail "missing file ${file}"
+  first_line="$(grep -nF "${first}" "${file}" | head -n 1 | cut -d: -f1)"
+  second_line="$(grep -nF "${second}" "${file}" | head -n 1 | cut -d: -f1)"
+  [[ -n "${first_line}" ]] || fail "missing ordered line: ${first}"
+  [[ -n "${second_line}" ]] || fail "missing ordered line: ${second}"
+  (( first_line < second_line )) || fail "expected ${first} before ${second}"
+}
+
 run_in_temp_home() {
   local tmp_home="$1"
   shift
@@ -427,6 +440,102 @@ STUB
   if grep -Fq "curl " "${calls_file}"; then
     fail "cached bootstrap called curl"
   fi
+}
+
+test_deploy_apply_imports_runtime_images_before_components() {
+  local tmp_home tmp_bin calls_file cache_dir chart_dir k3s_dir image_dir metadata_dir
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  cache_dir="${tmp_home}/.kadm/cache/manifests"
+  chart_dir="${tmp_home}/.kadm/cache/charts"
+  k3s_dir="${tmp_home}/.kadm/cache/k3s"
+  image_dir="${tmp_home}/.kadm/cache/images"
+  metadata_dir="${tmp_home}/.kadm/cache/metadata"
+  mkdir -p "${cache_dir}" "${chart_dir}" "${k3s_dir}" "${image_dir}" "${metadata_dir}" "${tmp_home}/.kadm/bin"
+  for manifest in \
+    https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml \
+    https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml \
+    https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml; do
+    cat > "${cache_dir}/${manifest}" <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cached-manifest
+YAML
+  done
+  printf 'gateway.networking.k8s.io/channel: experimental\n' >> "${cache_dir}/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
+  printf 'chart\n' > "${chart_dir}/cilium-1.19.5.tgz"
+  printf 'install\n' > "${k3s_dir}/install-v1.36.2+k3s1.sh"
+  printf 'binary\n' > "${k3s_dir}/k3s-v1.36.2+k3s1"
+  printf 'airgap\n' > "${k3s_dir}/k3s-airgap-images-v1.36.2+k3s1-amd64.tar.zst"
+  printf 'archive\n' > "${image_dir}/runtime-images.tar.zst"
+  printf 'quay.io/argoproj/argocd:v3.4.4\n' > "${image_dir}/runtime-images.txt"
+  printf 'checksum\n' > "${image_dir}/runtime-images.sha256"
+  cat > "${metadata_dir}/offline-bundle.env" <<'ENV'
+KADM_OFFLINE_BUNDLE_FORMAT=2
+KADM_OFFLINE_COMPLETE=true
+KADM_OFFLINE_IMAGE_IMPORT=containerd
+ENV
+
+  cat > "${tmp_home}/.kadm/bin/helm" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'helm %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+STUB
+  chmod +x "${tmp_home}/.kadm/bin/helm"
+
+  cat > "${tmp_bin}/sudo" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sudo %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"cat /etc/rancher/k3s/k3s.yaml"* ]]; then
+  printf 'apiVersion: v1\nclusters:\n- cluster:\n    server: https://127.0.0.1:6443\n'
+  exit 0
+fi
+if [[ "$*" == *"cat /var/lib/rancher/k3s/server/node-token"* ]]; then
+  printf 'k10token\n'
+  exit 0
+fi
+if [[ "$*" == *"k3s ctr -n k8s.io images ls -q"* ]]; then
+  printf 'quay.io/argoproj/argocd:v3.4.4\n'
+  exit 0
+fi
+cat >/dev/null || true
+STUB
+  cat > "${tmp_bin}/zstd" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'zstd %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+printf 'image tar stream\n'
+STUB
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get --raw=/readyz"* ]]; then
+  printf 'ok\n'
+  exit 0
+fi
+if [[ "$*" == *"create namespace"* ]]; then
+  printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test\n'
+  exit 0
+fi
+if [[ "$*" == *"get daemonset"* || "$*" == *"get deploy"* || "$*" == *"get statefulset"* ]]; then
+  printf '1 1\n'
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/sudo" "${tmp_bin}/zstd" "${tmp_bin}/kubectl"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" deploy --name home-prod --access-host root@127.0.0.1 --private-ip 10.0.0.11 --apply)"
+
+  assert_contains "${output}" "Importing runtime container images"
+  assert_file_contains "${calls_file}" "zstd -dc ${image_dir}/runtime-images.tar.zst"
+  assert_file_contains "${calls_file}" "sudo k3s ctr -n k8s.io images import -"
+  assert_file_line_order "${calls_file}" "sudo k3s ctr -n k8s.io images import -" "helm --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml upgrade --install cilium"
 }
 
 test_connect_dry_run_uses_profile() {
@@ -975,6 +1084,44 @@ test_install_tools_dry_run_is_script_managed() {
   [[ ! -e "${tmp_home}/.kadm/bin/helm" ]] || fail "dry-run installed helm"
 }
 
+test_install_tools_uses_cached_helm_archive() {
+  local tmp_home tmp_bin calls_file platform archive_root archive
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) platform="darwin-arm64" ;;
+    Darwin:x86_64) platform="darwin-amd64" ;;
+    Linux:x86_64) platform="linux-amd64" ;;
+    Linux:aarch64|Linux:arm64) platform="linux-arm64" ;;
+    *) fail "unsupported test platform" ;;
+  esac
+  archive_root="${tmp_home}/archive-root"
+  archive="${tmp_home}/.kadm/cache/tools/helm-v3.15.4-${platform}.tar.gz"
+  mkdir -p "${archive_root}/${platform}" "$(dirname "${archive}")"
+  cat > "${archive_root}/${platform}/helm" <<'STUB'
+#!/usr/bin/env bash
+printf 'cached helm\n'
+STUB
+  chmod +x "${archive_root}/${platform}/helm"
+  tar -czf "${archive}" -C "${archive_root}" "${platform}"
+
+  cat > "${tmp_bin}/curl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+exit 1
+STUB
+  chmod +x "${tmp_bin}/curl"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" install-tools --apply)"
+
+  assert_contains "${output}" "Using cached helm archive: ${archive}"
+  [[ -x "${tmp_home}/.kadm/bin/helm" ]] || fail "cached helm was not installed"
+  [[ ! -f "${calls_file}" ]] || fail "install-tools called curl despite cached Helm archive"
+}
+
 test_prepare_assets_dry_run_prints_pinned_assets() {
   local tmp_home
   tmp_home="$(mktemp -d)"
@@ -1029,13 +1176,14 @@ STUB
 }
 
 test_prepare_assets_reuses_compatible_legacy_manifest_cache() {
-  local tmp_home tmp_bin calls_file cache_dir chart_dir
+  local tmp_home tmp_bin calls_file cache_dir chart_dir k3s_dir
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   cache_dir="${tmp_home}/.kadm/cache/manifests"
   chart_dir="${tmp_home}/.kadm/cache/charts"
-  mkdir -p "${cache_dir}" "${chart_dir}"
+  k3s_dir="${tmp_home}/.kadm/cache/k3s"
+  mkdir -p "${cache_dir}" "${chart_dir}" "${k3s_dir}"
   cat > "${cache_dir}/https___raw.githubusercontent.com_argoproj_argo-cd_stable_manifests_install.yaml.yaml" <<'YAML'
 apiVersion: apps/v1
 kind: Deployment
@@ -1061,6 +1209,9 @@ metadata:
     gateway.networking.k8s.io/bundle-version: v1.5.1
 YAML
   printf 'chart\n' > "${chart_dir}/cilium-1.19.5.tgz"
+  printf 'install\n' > "${k3s_dir}/install-v1.36.2+k3s1.sh"
+  printf 'binary\n' > "${k3s_dir}/k3s-v1.36.2+k3s1"
+  printf 'airgap\n' > "${k3s_dir}/k3s-airgap-images-v1.36.2+k3s1-amd64.tar.zst"
 
   cat > "${tmp_bin}/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -1124,6 +1275,77 @@ test_import_assets_restores_offline_cache() {
   assert_contains "${output}" "offline asset bundle imported"
   [[ -s "${dst_home}/.kadm/cache/charts/cilium-1.19.5.tgz" ]] || fail "import missing Cilium chart"
   [[ -s "${dst_home}/.kadm/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml" ]] || fail "import missing Gateway API manifest"
+}
+
+test_import_assets_restores_complete_bundle_metadata() {
+  local src_dir dst_home bundle
+  src_dir="$(mktemp -d)"
+  dst_home="$(mktemp -d)"
+  bundle="${src_dir}/kadm-platform-assets.tgz"
+  mkdir -p \
+    "${src_dir}/bundle/cache/manifests" \
+    "${src_dir}/bundle/cache/charts" \
+    "${src_dir}/bundle/cache/k3s" \
+    "${src_dir}/bundle/cache/tools" \
+    "${src_dir}/bundle/cache/images" \
+    "${src_dir}/bundle/cache/repos" \
+    "${src_dir}/bundle/metadata"
+
+  printf 'gateway\n' > "${src_dir}/bundle/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
+  printf 'argocd\n' > "${src_dir}/bundle/cache/manifests/https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml"
+  printf 'rollouts\n' > "${src_dir}/bundle/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
+  printf 'chart\n' > "${src_dir}/bundle/cache/charts/cilium-1.19.5.tgz"
+  printf 'helm\n' > "${src_dir}/bundle/cache/tools/helm-v3.15.4-linux-amd64.tar.gz"
+  printf 'image archive\n' > "${src_dir}/bundle/cache/images/runtime-images.tar.zst"
+  printf 'quay.io/argoproj/argocd:v3.4.4\n' > "${src_dir}/bundle/cache/images/runtime-images.txt"
+  printf 'checksum\n' > "${src_dir}/bundle/cache/images/runtime-images.sha256"
+  printf 'system\n' > "${src_dir}/bundle/cache/repos/kadm-platform-system.tgz"
+  printf 'console\n' > "${src_dir}/bundle/cache/repos/kadm-release-console.tgz"
+  printf 'apps\n' > "${src_dir}/bundle/cache/repos/kadm-app-configs.tgz"
+  cat > "${src_dir}/bundle/metadata/offline-bundle.env" <<'ENV'
+KADM_OFFLINE_BUNDLE_FORMAT=2
+KADM_OFFLINE_COMPLETE=true
+KADM_OFFLINE_IMAGE_IMPORT=containerd
+KADM_OFFLINE_ARCH=linux-amd64
+ENV
+  tar -czf "${bundle}" -C "${src_dir}/bundle" cache metadata
+
+  local output
+  output="$(HOME="${dst_home}" "${KADMCTL}" import-assets "${bundle}")"
+
+  assert_contains "${output}" "offline asset bundle imported"
+  assert_contains "${output}" "offline bundle mode: complete"
+  [[ -s "${dst_home}/.kadm/cache/metadata/offline-bundle.env" ]] || fail "import missing bundle metadata"
+  [[ -s "${dst_home}/.kadm/cache/tools/helm-v3.15.4-linux-amd64.tar.gz" ]] || fail "import missing cached Helm archive"
+  [[ -s "${dst_home}/.kadm/cache/images/runtime-images.tar.zst" ]] || fail "import missing runtime images archive"
+  [[ -s "${dst_home}/.kadm/cache/repos/kadm-platform-system.tgz" ]] || fail "import missing system repo archive"
+}
+
+test_import_assets_clears_stale_complete_metadata_for_partial_bundle() {
+  local src_dir dst_home bundle
+  src_dir="$(mktemp -d)"
+  dst_home="$(mktemp -d)"
+  bundle="${src_dir}/kadm-platform-assets.tgz"
+  mkdir -p \
+    "${src_dir}/bundle/cache/manifests" \
+    "${src_dir}/bundle/cache/charts" \
+    "${dst_home}/.kadm/cache/metadata"
+
+  printf 'gateway\n' > "${src_dir}/bundle/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
+  printf 'argocd\n' > "${src_dir}/bundle/cache/manifests/https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml"
+  printf 'rollouts\n' > "${src_dir}/bundle/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
+  printf 'chart\n' > "${src_dir}/bundle/cache/charts/cilium-1.19.5.tgz"
+  cat > "${dst_home}/.kadm/cache/metadata/offline-bundle.env" <<'ENV'
+KADM_OFFLINE_BUNDLE_FORMAT=2
+KADM_OFFLINE_COMPLETE=true
+ENV
+  tar -czf "${bundle}" -C "${src_dir}/bundle" cache
+
+  local output
+  output="$(HOME="${dst_home}" "${KADMCTL}" import-assets "${bundle}")"
+
+  assert_contains "${output}" "offline bundle mode: partial"
+  [[ ! -e "${dst_home}/.kadm/cache/metadata/offline-bundle.env" ]] || fail "partial import left stale complete metadata"
 }
 
 test_reset_node_dry_run_is_safe() {
@@ -1462,6 +1684,7 @@ test_bootstrap_dry_run_prints_safe_plan
 test_bootstrap_apply_writes_profile_rewrites_kubeconfig_and_installs_base_components
 test_bootstrap_retries_transient_manifest_apply_failures
 test_bootstrap_uses_cached_manifests_without_network
+test_deploy_apply_imports_runtime_images_before_components
 test_connect_dry_run_uses_profile
 test_connect_waits_for_api_before_starting_port_forward
 test_status_uses_profile_and_api_tunnel
@@ -1473,11 +1696,14 @@ test_publish_release_console_apply_triggers_github_actions_and_pulls_overlay
 test_publish_release_console_rejects_dirty_repo
 test_publish_onecd_alias_still_works
 test_install_tools_dry_run_is_script_managed
+test_install_tools_uses_cached_helm_archive
 test_prepare_assets_dry_run_prints_pinned_assets
 test_prepare_assets_apply_downloads_pinned_assets
 test_prepare_assets_reuses_compatible_legacy_manifest_cache
 test_export_assets_packages_offline_cache
 test_import_assets_restores_offline_cache
+test_import_assets_restores_complete_bundle_metadata
+test_import_assets_clears_stale_complete_metadata_for_partial_bundle
 test_reset_node_dry_run_is_safe
 test_reset_node_apply_runs_remote_cleanup_script
 test_cleanup_legacy_onecd_dry_run_describes_legacy_resources

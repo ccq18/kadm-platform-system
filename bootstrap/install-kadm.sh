@@ -92,6 +92,15 @@ release_console_dir="${workspace_root}/${release_console_repo}"
 app_configs_dir="${workspace_root}/${app_configs_repo}"
 bundle_path="${download_root}/kadm-platform-assets.tgz"
 
+github_url_uses_token() {
+  local url="$1"
+  [[ "${url}" == https://api.github.com/* || "${url}" == https://github.com/* || "${url}" == https://raw.githubusercontent.com/* ]]
+}
+
+curl_supports_retry_all_errors() {
+  curl --help all 2>/dev/null | grep -q -- "--retry-all-errors"
+}
+
 download_url() {
   local url="$1"
   local output="$2"
@@ -105,7 +114,11 @@ download_url() {
     --max-time 1800
   )
 
-  if [[ -n "${KADM_GITHUB_TOKEN:-}" ]]; then
+  if curl_supports_retry_all_errors; then
+    curl_args+=(--retry-all-errors)
+  fi
+
+  if [[ -n "${KADM_GITHUB_TOKEN:-}" ]] && github_url_uses_token "${url}"; then
     curl_args+=(
       -H "Authorization: Bearer ${KADM_GITHUB_TOKEN}"
       -H "X-GitHub-Api-Version: 2022-11-28"
@@ -151,6 +164,10 @@ resolve_repo_ref_sha() {
     --max-time 120
   )
 
+  if curl_supports_retry_all_errors; then
+    curl_args+=(--retry-all-errors)
+  fi
+
   if [[ -n "${KADM_GITHUB_TOKEN:-}" ]]; then
     curl_args+=(
       -H "Authorization: Bearer ${KADM_GITHUB_TOKEN}"
@@ -162,6 +179,68 @@ resolve_repo_ref_sha() {
   sha="$(printf '%s\n' "${response}" | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
   [[ -n "${sha}" ]] || die "failed to resolve ${repo}@${ref} to a commit sha"
   printf '%s\n' "${sha}"
+}
+
+bundle_extract_entry_to_file() {
+  local bundle="$1"
+  local path="$2"
+  local output="$3"
+
+  if tar -xOf "${bundle}" "${path}" > "${output}" 2>/dev/null; then
+    return 0
+  fi
+  tar -xOf "${bundle}" "./${path}" > "${output}" 2>/dev/null
+}
+
+bundle_declares_complete() {
+  local bundle="$1"
+  local metadata_file
+  metadata_file="$(mktemp)"
+  if ! bundle_extract_entry_to_file "${bundle}" "metadata/offline-bundle.env" "${metadata_file}"; then
+    rm -f "${metadata_file}"
+    return 1
+  fi
+  local result
+  if grep -Fxq "KADM_OFFLINE_COMPLETE=true" "${metadata_file}"; then
+    result=0
+  else
+    result=1
+  fi
+  rm -f "${metadata_file}"
+  return "${result}"
+}
+
+restore_repo_archive_from_bundle() {
+  local bundle="$1"
+  local repo="$2"
+  local target_dir="$3"
+  local archive tmp_extract extracted_dir
+
+  archive="$(mktemp)"
+  if ! bundle_extract_entry_to_file "${bundle}" "cache/repos/${repo}.tgz" "${archive}"; then
+    rm -f "${archive}"
+    return 1
+  fi
+  tmp_extract="$(mktemp -d)"
+  tar -xzf "${archive}" -C "${tmp_extract}"
+  extracted_dir="$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  [[ -n "${extracted_dir}" ]] || die "failed to extract bundled ${repo}"
+
+  rm -rf "${target_dir}"
+  mkdir -p "$(dirname "${target_dir}")"
+  mv "${extracted_dir}" "${target_dir}"
+  rm -rf "${tmp_extract}" "${archive}"
+}
+
+restore_workspace_from_bundle() {
+  local bundle="$1"
+  require_command tar
+  require_command find
+
+  restore_repo_archive_from_bundle "${bundle}" "${system_repo}" "${system_dir}" || return 1
+  restore_repo_archive_from_bundle "${bundle}" "${release_console_repo}" "${release_console_dir}" || return 1
+  restore_repo_archive_from_bundle "${bundle}" "${app_configs_repo}" "${app_configs_dir}" || return 1
+  info "Restored workspace repositories from offline asset bundle"
 }
 
 ensure_workspace() {
@@ -186,9 +265,15 @@ install_local_kadmctl() {
 }
 
 prepare_phase() {
-  ensure_workspace
   info "Downloading offline asset bundle"
   download_url "${asset_bundle_url}" "${bundle_path}"
+
+  if ! restore_workspace_from_bundle "${bundle_path}"; then
+    if bundle_declares_complete "${bundle_path}"; then
+      die "complete offline bundle is missing cache/repos workspace archives"
+    fi
+    ensure_workspace
+  fi
 
   info "Importing offline asset bundle"
   "${system_dir}/bin/kadmctl" import-assets "${bundle_path}"

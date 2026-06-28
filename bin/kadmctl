@@ -215,6 +215,28 @@ chart_cache_dir() {
   echo "$(cache_dir)/charts"
 }
 
+tool_cache_dir() {
+  echo "$(cache_dir)/tools"
+}
+
+helm_archive_cache_path() {
+  local helm_version="$1"
+  local platform="$2"
+  echo "$(tool_cache_dir)/helm-${helm_version}-${platform}.tar.gz"
+}
+
+image_cache_dir() {
+  echo "$(cache_dir)/images"
+}
+
+repo_cache_dir() {
+  echo "$(cache_dir)/repos"
+}
+
+metadata_cache_dir() {
+  echo "$(cache_dir)/metadata"
+}
+
 cilium_chart_path() {
   local version="$1"
   echo "$(chart_cache_dir)/cilium-${version}.tgz"
@@ -237,6 +259,34 @@ k3s_binary_path() {
 k3s_airgap_images_path() {
   local version="$1"
   echo "$(k3s_cache_dir)/k3s-airgap-images-${version}-${DEFAULT_K3S_ARCH}.tar.zst"
+}
+
+offline_bundle_metadata_path() {
+  echo "$(metadata_cache_dir)/offline-bundle.env"
+}
+
+offline_metadata_value() {
+  local key="$1"
+  local metadata
+  metadata="$(offline_bundle_metadata_path)"
+  [[ -f "${metadata}" ]] || return 1
+  sed -n "s/^${key}=//p" "${metadata}" | tail -n 1
+}
+
+offline_complete_bundle_active() {
+  [[ "$(offline_metadata_value KADM_OFFLINE_COMPLETE 2>/dev/null || true)" == "true" ]]
+}
+
+runtime_images_archive_path() {
+  echo "$(image_cache_dir)/runtime-images.tar.zst"
+}
+
+runtime_images_list_path() {
+  echo "$(image_cache_dir)/runtime-images.txt"
+}
+
+runtime_images_checksum_path() {
+  echo "$(image_cache_dir)/runtime-images.sha256"
 }
 
 detect_platform() {
@@ -516,24 +566,35 @@ cmd_export_assets() {
 
 cmd_import_assets() {
   local archive="${1:-}"
-  local archive_listing
   [[ -n "${archive}" ]] || die "import-assets requires a bundle path"
   [[ $# -eq 1 ]] || die "unexpected import-assets arguments"
   [[ -f "${archive}" ]] || die "offline asset bundle not found: ${archive}"
   require_command tar
 
-  archive_listing="$(tar -tzf "${archive}")"
-  if ! printf '%s\n' "${archive_listing}" | awk '
-    /^cache\/manifests\// { manifests = 1 }
-    /^cache\/charts\// { charts = 1 }
-    END { exit !(manifests && charts) }
-  '; then
+  mkdir -p "$(state_root)"
+  rm -rf "$(metadata_cache_dir)"
+  tar -xzf "${archive}" -C "$(state_root)"
+  if [[ ! -d "$(manifest_cache_dir)" || ! -d "$(chart_cache_dir)" ]]; then
     die "offline asset bundle must contain cache/manifests and cache/charts entries"
   fi
-
-  mkdir -p "$(state_root)"
-  tar -xzf "${archive}" -C "$(state_root)"
+  if [[ -d "$(state_root)/metadata" ]]; then
+    mkdir -p "$(metadata_cache_dir)"
+    cp -R "$(state_root)/metadata/." "$(metadata_cache_dir)/"
+    rm -rf "$(state_root)/metadata"
+  fi
   require_default_assets
+  if offline_complete_bundle_active; then
+    [[ -d "$(tool_cache_dir)" ]] || die "complete offline bundle missing cache/tools"
+    [[ -s "$(runtime_images_archive_path)" ]] || die "complete offline bundle missing $(runtime_images_archive_path)"
+    [[ -s "$(runtime_images_list_path)" ]] || die "complete offline bundle missing $(runtime_images_list_path)"
+    [[ -s "$(runtime_images_checksum_path)" ]] || die "complete offline bundle missing $(runtime_images_checksum_path)"
+    [[ -s "$(repo_cache_dir)/kadm-platform-system.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-platform-system.tgz"
+    [[ -s "$(repo_cache_dir)/kadm-release-console.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-release-console.tgz"
+    [[ -s "$(repo_cache_dir)/kadm-app-configs.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-app-configs.tgz"
+    info "offline bundle mode: complete"
+  else
+    info "offline bundle mode: partial"
+  fi
   info "offline asset bundle imported: ${archive}"
 }
 
@@ -543,7 +604,6 @@ install_helm() {
   local dir="$3"
   local target="${dir}/helm"
 
-  require_command curl
   require_command tar
   require_command mktemp
 
@@ -557,10 +617,22 @@ install_helm() {
   tmp="$(mktemp -d)"
   mkdir -p "${dir}"
 
-  local archive="${tmp}/helm.tgz"
+  local archive cached_archive
+  archive="${tmp}/helm.tgz"
+  cached_archive="$(helm_archive_cache_path "${helm_version}" "${platform}")"
   local url="https://get.helm.sh/helm-${helm_version}-${platform}.tar.gz"
-  info "Installing helm ${helm_version} for ${platform} into ${dir}"
-  curl -fsSL "${url}" -o "${archive}"
+  if [[ -s "${cached_archive}" ]]; then
+    info "Using cached helm archive: ${cached_archive}"
+    cp "${cached_archive}" "${archive}"
+  else
+    if offline_complete_bundle_active; then
+      rm -rf "${tmp}"
+      die "complete offline bundle missing cached helm archive: ${cached_archive}"
+    fi
+    require_command curl
+    info "Installing helm ${helm_version} for ${platform} into ${dir}"
+    curl -fsSL "${url}" -o "${archive}"
+  fi
   tar -xzf "${archive}" -C "${tmp}"
   cp "${tmp}/${platform}/helm" "${target}"
   chmod 700 "${target}"
@@ -751,6 +823,65 @@ require_local_k3s_assets() {
   require_cached_file "$(k3s_install_script_path "${version}")" "K3s install script"
   require_cached_file "$(k3s_binary_path "${version}")" "K3s binary"
   require_cached_file "$(k3s_airgap_images_path "${version}")" "K3s airgap images"
+}
+
+check_runtime_image_disk_space() {
+  local path available_kib required_kib warn_kib
+  path="$(state_root)"
+  required_kib=$((8 * 1024 * 1024))
+  warn_kib=$((20 * 1024 * 1024))
+  available_kib="$(df -Pk "${path}" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+  [[ "${available_kib}" =~ ^[0-9]+$ ]] || return 0
+  if (( available_kib < required_kib )); then
+    die "at least 8 GiB free disk space is required to import runtime images"
+  fi
+  if (( available_kib < warn_kib )); then
+    info "warning: less than 20 GiB free disk space is available for runtime image import"
+  fi
+}
+
+verify_runtime_images_present() {
+  local list_path image imported_images missing=0
+  list_path="$(runtime_images_list_path)"
+  [[ -s "${list_path}" ]] || {
+    if offline_complete_bundle_active; then
+      die "complete offline bundle missing runtime image list: ${list_path}"
+    fi
+    return 0
+  }
+
+  require_command sudo
+  imported_images="$(sudo k3s ctr -n k8s.io images ls -q)"
+  while IFS= read -r image; do
+    image="${image%%#*}"
+    image="${image#"${image%%[![:space:]]*}"}"
+    image="${image%"${image##*[![:space:]]}"}"
+    [[ -n "${image}" ]] || continue
+    if ! printf '%s\n' "${imported_images}" | grep -Fxq "${image}"; then
+      echo "missing imported runtime image: ${image}" >&2
+      missing=1
+    fi
+  done < "${list_path}"
+
+  [[ "${missing}" -eq 0 ]] || die "one or more runtime images are missing from K3s containerd"
+}
+
+import_runtime_images_if_available() {
+  local archive
+  archive="$(runtime_images_archive_path)"
+  if [[ ! -s "${archive}" ]]; then
+    if offline_complete_bundle_active; then
+      die "complete offline bundle missing runtime image archive: ${archive}"
+    fi
+    return 0
+  fi
+
+  require_command zstd
+  require_command sudo
+  check_runtime_image_disk_space
+  info "Importing runtime container images: ${archive}"
+  zstd -dc "${archive}" | sudo k3s ctr -n k8s.io images import -
+  verify_runtime_images_present
 }
 
 detect_local_private_ip() {
@@ -2122,6 +2253,7 @@ cmd_deploy() {
 
   info "Installing first local K3s server"
   install_local_k3s "${private_ip}" "${k3s_version}"
+  import_runtime_images_if_available
 
   local tmp_kubeconfig
   tmp_kubeconfig="$(mktemp)"
@@ -2401,6 +2533,10 @@ cmd_configure_delivery() {
     tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
   fi
   wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
+  if offline_complete_bundle_active; then
+    info "Verifying runtime container images before delivery configuration"
+    verify_runtime_images_present
+  fi
 
   local argocd_token="${ONECD_ARGOCD_TOKEN:-}"
   if [[ -z "${argocd_token}" ]]; then
