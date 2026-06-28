@@ -176,6 +176,11 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s wait --for=condition=Established crd/tlsroutes.gateway.networking.k8s.io --timeout=180s"
   [[ "$(grep -Fc "wait --for=condition=Established crd/gatewayclasses.gateway.networking.k8s.io" "${calls_file}")" -ge 2 ]] || fail "Gateway API CRD wait was not retried"
   assert_file_contains "${calls_file}" "helm --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml upgrade --install cilium ${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz --timeout 10m --disable-openapi-validation"
+  assert_file_contains "${calls_file}" "--set gatewayAPI.enabled=true"
+  assert_file_contains "${calls_file}" "--set gatewayAPI.hostNetwork.enabled=true"
+  assert_file_contains "${calls_file}" "--set envoy.enabled=true"
+  assert_file_contains "${calls_file}" "--set envoy.securityContext.capabilities.keepCapNetBindService=true"
+  assert_file_contains "${calls_file}" "--set envoy.securityContext.capabilities.envoy[0]=NET_BIND_SERVICE"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kube-system get daemonset cilium -o jsonpath="
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -n argocd -f ${tmp_home}/.kadm/cache/manifests/"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get deploy argocd-server -o jsonpath="
@@ -712,7 +717,7 @@ STUB
   chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" ONECD_GATEWAY_TLS_WILDCARD_DOMAIN="ai47.cc" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
 
   assert_contains "${output}" "delivery configuration applied"
   assert_contains "${output}" "Generating Argo CD session token for KADM release console"
@@ -740,6 +745,8 @@ STUB
   assert_file_contains "${stdin_file}" "kind: Gateway"
   assert_file_contains "${stdin_file}" "name: apps-gateway"
   assert_file_contains "${stdin_file}" "gatewayClassName: cilium"
+  assert_file_contains "${stdin_file}" "name: apps-gateway-tls"
+  assert_file_contains "${stdin_file}" "protocol: HTTPS"
   assert_file_contains "${stdin_file}" "\"id\": \"demo-hello\""
   assert_file_contains "${stdin_file}" "name: ghcr-cred"
   assert_file_contains "${stdin_file}" "kind: Application"

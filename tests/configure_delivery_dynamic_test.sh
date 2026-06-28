@@ -140,6 +140,7 @@ STUB
     PATH="${tmp_bin}:${PATH}" \
     HOME="${tmp_home}" \
     ONECD_GITHUB_TOKEN="secret-token" \
+    ONECD_GATEWAY_TLS_WILDCARD_DOMAIN="ai47.cc" \
     ONECD_ARGOCD_TOKEN="argocd-token" \
     "${KADMCTL}" configure-delivery home-prod \
       --onecd-overlay "${tmp_home}/overlay" \
@@ -155,6 +156,8 @@ STUB
   assert_file_contains "${stdin_file}" "kind: Gateway"
   assert_file_contains "${stdin_file}" "name: apps-gateway"
   assert_file_contains "${stdin_file}" "gatewayClassName: cilium"
+  assert_file_contains "${stdin_file}" "name: apps-gateway-tls"
+  assert_file_contains "${stdin_file}" "protocol: HTTPS"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd patch configmap argocd-cm --type merge --patch-file"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd delete application legacy-one --ignore-not-found"
 }
