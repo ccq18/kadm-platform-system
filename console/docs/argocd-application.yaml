@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: kadm-release-console
+  name: kadm-platform-system
   namespace: argocd
 spec:
   project: default

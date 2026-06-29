@@ -1,4 +1,4 @@
-name: Build Release Console
+name: Build Platform System Image
 
 on:
   workflow_dispatch:
@@ -12,14 +12,14 @@ on:
       - main
     paths:
       - console/**
-      - .github/workflows/build-release-console.yaml
+      - .github/workflows/build-platform-system-image.yaml
 
 permissions:
   contents: write
   packages: write
 
 concurrency:
-  group: build-release-console-${{ github.ref }}
+  group: build-platform-system-image-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
             tag="sha-${GITHUB_SHA::7}"
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "image=ghcr.io/ccq18/kadm-release-console:${tag}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/ccq18/kadm-platform-system:${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -94,7 +94,7 @@ jobs:
       - name: Update prod image tag
         run: |
           cd k8s/overlays/prod
-          kustomize edit set image ghcr.io/ccq18/kadm-release-console=ghcr.io/ccq18/kadm-release-console:${{ steps.meta.outputs.tag }}
+          kustomize edit set image ghcr.io/ccq18/kadm-platform-system=ghcr.io/ccq18/kadm-platform-system:${{ steps.meta.outputs.tag }}
 
       - name: Commit manifest update
         working-directory: .
@@ -106,5 +106,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add console/k8s/overlays/prod/kustomization.yaml
-          git commit -m "chore: release kadm-release-console ${{ steps.meta.outputs.tag }}"
+          git commit -m "chore: release kadm-platform-system ${{ steps.meta.outputs.tag }}"
           git push

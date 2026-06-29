@@ -5,13 +5,13 @@
 The GitHub Actions workflow builds:
 
 ```text
-ghcr.io/ccq18/kadm-release-console:<tag>
+ghcr.io/ccq18/kadm-platform-system:<tag>
 ```
 
 Manual trigger:
 
 ```bash
-gh workflow run build-release-console.yaml --repo ccq18/kadm-platform-system -f image_tag=<tag>
+gh workflow run build-platform-system-image.yaml --repo ccq18/kadm-platform-system -f image_tag=<tag>
 ```
 
 ## 2. Recommended Install Path

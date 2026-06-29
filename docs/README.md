@@ -26,7 +26,7 @@
 | `archive/design-drafts/README.md` | 历史设计草稿 |
 | `archive/agent-worklogs/README.md` | AI 过程文档和工作日志 |
 
-不要从 `hello/`、`hellospring/`、`ops/platform/` 或 `kadm-release-console/` 的旧文档开始当前 KADM 安装或发布。
+不要从历史 demo、旧 ops 平台或其他归档资料开始当前 KADM 安装或发布。
 
 ---
 
@@ -58,4 +58,4 @@ The following materials have been moved into the archive area and are no longer 
 | `archive/design-drafts/README.md` | Historical design drafts |
 | `archive/agent-worklogs/README.md` | AI process notes and worklogs |
 
-Do not start a current KADM install or release workflow from the legacy docs under `hello/`, `hellospring/`, `ops/platform/`, or `kadm-release-console`.
+Do not start a current KADM install or release workflow from legacy demo docs, old ops platform material, or other archived references.

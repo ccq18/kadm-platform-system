@@ -1,5 +1,5 @@
 {
-  "name": "kadm-release-console",
+  "name": "kadm-platform-system",
   "version": "0.1.0",
   "description": "KADM release console for GitHub Actions, Argo CD, and Argo Rollouts managed apps.",
   "private": true,

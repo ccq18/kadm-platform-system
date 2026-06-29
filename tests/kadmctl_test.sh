@@ -1190,14 +1190,14 @@ STUB
   [[ ! -s "${calls_file}" ]] || fail "configure-delivery touched external tools before app registry preflight"
 }
 
-test_configure_delivery_legacy_release_console_overlay_uses_legacy_repo_path() {
+test_configure_delivery_legacy_overlay_uses_system_repo_path() {
   local tmp_home tmp_bin calls_file stdin_file tmp_app_configs overlay_dir
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   stdin_file="${tmp_home}/stdin.log"
   tmp_app_configs="$(mktemp -d)"
-  overlay_dir="${tmp_home}/kadm-release-console/k8s/overlays/prod"
+  overlay_dir="${tmp_home}/legacy-console/k8s/overlays/prod"
   mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${overlay_dir}"
   mkdir -p "${tmp_app_configs}/apps/demo-hello/overlays/prod" "${tmp_app_configs}/apps/demo-hello/base" "${tmp_app_configs}/apps/demo-hello-spring/base"
   cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
@@ -1302,11 +1302,8 @@ STUB
   output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_ARGOCD_TOKEN="argocd-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${overlay_dir}" --app-configs-dir "${tmp_app_configs}" --apply)"
 
   assert_contains "${output}" "delivery configuration applied"
-  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-release-console.git"
-  assert_file_contains "${stdin_file}" "path: k8s/overlays/prod"
-  if grep -Fq "path: console/k8s/overlays/prod" "${stdin_file}"; then
-    fail "legacy release console overlay emitted new system repo path"
-  fi
+  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-platform-system.git"
+  assert_file_contains "${stdin_file}" "path: console/k8s/overlays/prod"
 }
 
 test_configure_delivery_apply_creates_secrets_without_token_in_arguments() {
@@ -1585,7 +1582,7 @@ STUB
   assert_file_contains "${stdin_file}" "\"id\": \"demo-hello\""
   assert_file_contains "${stdin_file}" "name: ghcr-cred"
   assert_file_contains "${stdin_file}" "kind: Application"
-  assert_file_contains "${stdin_file}" "name: kadm-release-console"
+  assert_file_contains "${stdin_file}" "name: kadm-platform-system"
   assert_file_contains "${stdin_file}" "name: demo-hello"
   assert_file_contains "${stdin_file}" "name: demo-hello-spring"
   assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-platform-system.git"
@@ -1607,8 +1604,8 @@ test_publish_release_console_dry_run_prints_ci_plan() {
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
-- name: ghcr.io/ccq18/kadm-release-console
-  newName: ghcr.io/ccq18/kadm-release-console
+- name: ghcr.io/ccq18/kadm-platform-system
+  newName: ghcr.io/ccq18/kadm-platform-system
   newTag: old
 YAML
 
@@ -1630,8 +1627,8 @@ STUB
 
   assert_contains "${output}" "DRY RUN: KADM release console release will not be triggered"
   assert_contains "${output}" "repo dir: ${tmp_onecd}"
-  assert_contains "${output}" "image: ghcr.io/ccq18/kadm-release-console:test-123"
-  assert_contains "${output}" "workflow: build-release-console.yaml"
+  assert_contains "${output}" "image: ghcr.io/ccq18/kadm-platform-system:test-123"
+  assert_contains "${output}" "workflow: build-platform-system-image.yaml"
   assert_contains "${output}" "ref: main"
   assert_contains "${output}" "updates overlay: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
 }
@@ -1649,8 +1646,8 @@ kind: Kustomization
 resources:
 - ../../base
 images:
-- name: ghcr.io/ccq18/kadm-release-console
-  newName: ghcr.io/ccq18/kadm-release-console
+- name: ghcr.io/ccq18/kadm-platform-system
+  newName: ghcr.io/ccq18/kadm-platform-system
   newTag: old
 YAML
 
@@ -1717,7 +1714,7 @@ STUB
   assert_contains "${output}" "updated overlay from git: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
   assert_file_contains "${calls_file}" "git -C ${tmp_onecd} config --get remote.origin.url"
   assert_file_contains "${calls_file}" "git -C ${tmp_onecd} fetch origin main --quiet"
-  assert_file_contains "${calls_file}" "gh workflow run build-release-console.yaml --repo ccq18/kadm-platform-system --ref main -f image_tag=test-123"
+  assert_file_contains "${calls_file}" "gh workflow run build-platform-system-image.yaml --repo ccq18/kadm-platform-system --ref main -f image_tag=test-123"
   assert_file_contains "${calls_file}" "gh run watch 12345 --repo ccq18/kadm-platform-system --exit-status"
   assert_file_contains "${calls_file}" "git -C ${tmp_onecd} pull --ff-only origin main"
 }
@@ -1732,8 +1729,8 @@ test_publish_release_console_rejects_dirty_repo() {
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
-- name: ghcr.io/ccq18/kadm-release-console
-  newName: ghcr.io/ccq18/kadm-release-console
+- name: ghcr.io/ccq18/kadm-platform-system
+  newName: ghcr.io/ccq18/kadm-platform-system
   newTag: old
 YAML
 
@@ -1781,8 +1778,8 @@ test_publish_onecd_alias_still_works() {
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
-- name: ghcr.io/ccq18/kadm-release-console
-  newName: ghcr.io/ccq18/kadm-release-console
+- name: ghcr.io/ccq18/kadm-platform-system
+  newName: ghcr.io/ccq18/kadm-platform-system
   newTag: old
 YAML
 
@@ -2639,7 +2636,7 @@ test_configure_delivery_traefik_mode_applies_ingress_and_httproute_health
 test_configure_delivery_retries_argocd_port_forward_on_local_port_conflict
 test_configure_delivery_fails_fast_when_ghcr_preflight_fails
 test_configure_delivery_fails_fast_on_invalid_app_registry
-test_configure_delivery_legacy_release_console_overlay_uses_legacy_repo_path
+test_configure_delivery_legacy_overlay_uses_system_repo_path
 test_configure_delivery_apply_creates_secrets_without_token_in_arguments
 test_publish_release_console_dry_run_prints_ci_plan
 test_publish_release_console_apply_triggers_github_actions_and_pulls_overlay

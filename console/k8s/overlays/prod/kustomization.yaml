@@ -3,6 +3,6 @@ kind: Kustomization
 resources:
 - ../../base
 images:
-- name: ghcr.io/ccq18/kadm-release-console
-  newName: ghcr.io/ccq18/kadm-release-console
+- name: ghcr.io/ccq18/kadm-platform-system
+  newName: ghcr.io/ccq18/kadm-platform-system
   newTag: sha-dd810af

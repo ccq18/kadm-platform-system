@@ -2251,10 +2251,10 @@ update_overlay_image_tag() {
 cmd_publish_release_console() {
   apply_kadm_env_aliases
   local repo_dir="${DEFAULT_ONECD_OVERLAY%/k8s/overlays/prod}"
-  local image="ghcr.io/ccq18/kadm-release-console"
+  local image="ghcr.io/ccq18/kadm-platform-system"
   local tag=""
   local ref="main"
-  local workflow="build-release-console.yaml"
+  local workflow="build-platform-system-image.yaml"
   local apply=0
 
   while [[ $# -gt 0 ]]; do
@@ -2427,15 +2427,7 @@ YAML
 }
 
 release_console_gitops_source() {
-  local overlay_path="${1%/}"
-  case "${overlay_path}" in
-    */kadm-release-console/k8s/overlays/prod)
-      printf 'kadm-release-console\thttps://github.com/ccq18/kadm-release-console.git\tk8s/overlays/prod\n'
-      ;;
-    *)
-      printf 'kadm-platform-system\thttps://github.com/ccq18/kadm-platform-system.git\tconsole/k8s/overlays/prod\n'
-      ;;
-  esac
+  printf 'kadm-platform-system\thttps://github.com/ccq18/kadm-platform-system.git\tconsole/k8s/overlays/prod\n'
 }
 
 list_registry_apps() {
@@ -3266,7 +3258,7 @@ cmd_configure_delivery() {
     emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-source-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml "${release_console_repo_name}" "${release_console_repo_url}" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml kadm-app-configs "https://github.com/ccq18/kadm-app-configs.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_application_yaml kadm-release-console "${release_console_repo_url}" kadm "${release_console_gitops_path}" "main" "system" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml kadm-platform-system "${release_console_repo_url}" kadm "${release_console_gitops_path}" "main" "system" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     list_registry_apps "${app_configs_dir}/apps/apps.json" > "${registry_apps_file}"
     while IFS=$'\t' read -r registry_name app_name gitops_owner gitops_repo gitops_path gitops_ref rollout_namespace; do
       [[ -n "${app_name}" ]] || continue

@@ -30,5 +30,5 @@ const server = createApp({
 });
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`kadm-release-console listening on port ${port}`);
+  console.log(`kadm-platform-system console listening on port ${port}`);
 });
