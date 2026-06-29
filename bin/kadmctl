@@ -2510,13 +2510,13 @@ $(sed 's/^/    /' "${apps_file}")
 YAML
 }
 
-apply_demo_secret_examples_if_present() {
+apply_demo_plaintext_secrets_if_present() {
   local kubeconfig_path="$1"
   local app_configs_dir="$2"
   local secret_file
   for secret_file in \
-    "${app_configs_dir}/apps/demo-hello/base/secret.example.yaml" \
-    "${app_configs_dir}/apps/demo-hello-spring/base/secret.example.yaml"; do
+    "${app_configs_dir}/apps/demo-hello/base/secret.yaml" \
+    "${app_configs_dir}/apps/demo-hello-spring/base/secret.yaml"; do
     [[ -f "${secret_file}" ]] || continue
     apply_delivery_yaml "${kubeconfig_path}" < "${secret_file}"
   done
@@ -3183,7 +3183,7 @@ cmd_configure_delivery() {
     create_namespace_if_missing "${KUBECONFIG_PATH}" kadm
     create_namespace_if_missing "${KUBECONFIG_PATH}" argocd
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
-    apply_demo_secret_examples_if_present "${KUBECONFIG_PATH}" "${app_configs_dir}"
+    apply_demo_plaintext_secrets_if_present "${KUBECONFIG_PATH}" "${app_configs_dir}"
     apply_argocd_rollout_health_customization "${KUBECONFIG_PATH}"
     if [[ "${ingress_mode}" == "gateway" ]]; then
       if [[ -n "${gateway_tls_secret_name}" ]]; then
@@ -3546,9 +3546,9 @@ cmd_configure_demo_apps() {
 
   validate_cluster_name "${cluster}"
   [[ -d "${app_configs_dir}" ]] || die "KADM app configs directory not found: ${app_configs_dir}"
-  local hello_secret_file="${app_configs_dir}/apps/demo-hello/base/secret.example.yaml"
+  local hello_secret_file="${app_configs_dir}/apps/demo-hello/base/secret.yaml"
   local hello_rollout_file="${app_configs_dir}/apps/demo-hello/base/rollout.yaml"
-  local spring_secret_file="${app_configs_dir}/apps/demo-hello-spring/base/secret.example.yaml"
+  local spring_secret_file="${app_configs_dir}/apps/demo-hello-spring/base/secret.yaml"
   local spring_rollout_file="${app_configs_dir}/apps/demo-hello-spring/base/rollout.yaml"
   [[ -f "${hello_secret_file}" ]] || die "demo hello secret file not found: ${hello_secret_file}"
   [[ -f "${hello_rollout_file}" ]] || die "demo hello rollout file not found: ${hello_rollout_file}"

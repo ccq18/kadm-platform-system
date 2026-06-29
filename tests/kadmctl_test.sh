@@ -928,7 +928,7 @@ PROFILE
   }
 ]
 JSON
-  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -940,7 +940,7 @@ stringData:
   DB_PASSWORD: hello_password_change_me
   DB_NAME: hello_app
 YAML
-  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -1090,7 +1090,7 @@ PROFILE
   }
 ]
 JSON
-  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -1102,7 +1102,7 @@ stringData:
   DB_PASSWORD: hello_password_change_me
   DB_NAME: hello_app
 YAML
-  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -1243,7 +1243,7 @@ PROFILE
   }
 ]
 JSON
-  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -1255,7 +1255,7 @@ stringData:
   DB_PASSWORD: hello_password_change_me
   DB_NAME: hello_app
 YAML
-  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2167,7 +2167,7 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/kadm/home-prod.yaml"
-  cat > "${apps_dir}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2191,7 +2191,7 @@ spec:
             - name: DB_HOST
               value: "10.120.0.6"
 YAML
-  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2245,7 +2245,7 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/kadm/home-prod.yaml"
-  cat > "${apps_dir}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2269,7 +2269,7 @@ spec:
             - name: DB_HOST
               value: "10.120.0.6"
 YAML
-  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2374,7 +2374,7 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/kadm/home-prod.yaml"
-  cat > "${apps_dir}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2398,7 +2398,7 @@ spec:
             - name: DB_HOST
               value: "10.120.0.6"
 YAML
-  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
