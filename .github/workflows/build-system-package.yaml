@@ -1,0 +1,40 @@
+name: Build System Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-system-package.yaml
+      - assets/**
+      - bin/**
+      - bootstrap/**
+      - config/**
+      - console/**
+      - scripts/build-system-package.sh
+      - templates/**
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build system package
+        run: |
+          chmod +x scripts/build-system-package.sh
+          scripts/build-system-package.sh
+
+      - name: Publish latest system package release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: system-latest
+          name: KADM Platform System (latest)
+          files: |
+            dist/kadm-platform-system.tgz
+          overwrite_files: true

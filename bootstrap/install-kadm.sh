@@ -23,17 +23,16 @@ case "${action}" in
   prepare|deploy|all)
     ;;
   *)
-    die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]..."
+    die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]... [--ingress-mode <gateway|traefik>]"
     ;;
 esac
 
 bootstrap_root="${KADM_BOOTSTRAP_ROOT:-/opt/kadm}"
 github_owner="${KADM_GITHUB_OWNER:-ccq18}"
 system_repo="${KADM_SYSTEM_REPO:-kadm-platform-system}"
-system_ref="${KADM_SYSTEM_REF:-main}"
-legacy_release_console_repo="kadm-release-console"
-# Last standalone console commit before the code moved into kadm-platform-system/console.
-legacy_release_console_ref="44090c49a4bf799904eb328d792eb9c9c1c5ecd1"
+system_release_tag="${KADM_SYSTEM_RELEASE_TAG:-system-latest}"
+system_package_name="${KADM_SYSTEM_PACKAGE_NAME:-${system_repo}.tgz}"
+system_package_url="${KADM_SYSTEM_PACKAGE_URL:-https://github.com/${github_owner}/${system_repo}/releases/download/${system_release_tag}/${system_package_name}}"
 app_configs_repo="${KADM_APP_CONFIGS_REPO:-kadm-app-configs}"
 app_configs_ref="${KADM_APP_CONFIGS_REF:-main}"
 assets_repo="${KADM_PLATFORM_ASSETS_REPO:-kadm-platform-assets}"
@@ -47,6 +46,7 @@ private_ip="${KADM_PRIVATE_IP:-}"
 api_port="${KADM_API_PORT:-16443}"
 console_port="${KADM_CONSOLE_PORT:-18080}"
 k3s_version="${KADM_K3S_VERSION:-}"
+ingress_mode="${KADM_INGRESS_MODE:-gateway}"
 dns_upstreams=()
 
 while [[ $# -gt 0 ]]; do
@@ -79,8 +79,12 @@ while [[ $# -gt 0 ]]; do
       dns_upstreams+=("${2:-}")
       shift 2
       ;;
+    --ingress-mode)
+      ingress_mode="${2:-}"
+      shift 2
+      ;;
     --help|-h)
-      die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]..."
+      die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]... [--ingress-mode <gateway|traefik>]"
       ;;
     *)
       die "unknown option: $1"
@@ -90,7 +94,6 @@ done
 
 system_dir="${workspace_root}/${system_repo}"
 release_console_dir="${system_dir}/console"
-legacy_release_console_dir="${workspace_root}/${legacy_release_console_repo}"
 app_configs_dir="${workspace_root}/${app_configs_repo}"
 bundle_path="${download_root}/kadm-platform-assets.tgz"
 
@@ -136,21 +139,13 @@ download_repo_archive() {
   local repo="$1"
   local ref="$2"
   local target_dir="$3"
-  local archive tmp_extract extracted_dir resolved_sha
+  local archive resolved_sha
 
   resolved_sha="$(resolve_repo_ref_sha "${repo}" "${ref}")"
-
   archive="$(mktemp)"
-  tmp_extract="$(mktemp -d)"
   download_url "https://api.github.com/repos/${github_owner}/${repo}/tarball/${resolved_sha}" "${archive}"
-  tar -xzf "${archive}" -C "${tmp_extract}"
-  extracted_dir="$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-  [[ -n "${extracted_dir}" ]] || die "failed to extract ${repo}@${ref}"
-
-  rm -rf "${target_dir}"
-  mkdir -p "$(dirname "${target_dir}")"
-  mv "${extracted_dir}" "${target_dir}"
-  rm -rf "${tmp_extract}" "${archive}"
+  extract_archive_to_dir "${archive}" "${target_dir}"
+  rm -f "${archive}"
 }
 
 resolve_repo_ref_sha() {
@@ -183,83 +178,41 @@ resolve_repo_ref_sha() {
   printf '%s\n' "${sha}"
 }
 
-bundle_extract_entry_to_file() {
-  local bundle="$1"
-  local path="$2"
-  local output="$3"
-
-  if tar -xOf "${bundle}" "${path}" > "${output}" 2>/dev/null; then
-    return 0
-  fi
-  tar -xOf "${bundle}" "./${path}" > "${output}" 2>/dev/null
-}
-
-bundle_declares_complete() {
-  local bundle="$1"
-  local metadata_file
-  metadata_file="$(mktemp)"
-  if ! bundle_extract_entry_to_file "${bundle}" "metadata/offline-bundle.env" "${metadata_file}"; then
-    rm -f "${metadata_file}"
-    return 1
-  fi
-  local result
-  if grep -Fxq "KADM_OFFLINE_COMPLETE=true" "${metadata_file}"; then
-    result=0
-  else
-    result=1
-  fi
-  rm -f "${metadata_file}"
-  return "${result}"
-}
-
-restore_repo_archive_from_bundle() {
-  local bundle="$1"
-  local repo="$2"
-  local target_dir="$3"
-  local archive tmp_extract extracted_dir
-
-  archive="$(mktemp)"
-  if ! bundle_extract_entry_to_file "${bundle}" "cache/repos/${repo}.tgz" "${archive}"; then
-    rm -f "${archive}"
-    return 1
-  fi
+extract_archive_to_dir() {
+  local archive="$1"
+  local target_dir="$2"
+  local tmp_extract extracted_dir
   tmp_extract="$(mktemp -d)"
   tar -xzf "${archive}" -C "${tmp_extract}"
   extracted_dir="$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-  [[ -n "${extracted_dir}" ]] || die "failed to extract bundled ${repo}"
+  [[ -n "${extracted_dir}" ]] || die "failed to extract ${archive}"
 
   rm -rf "${target_dir}"
   mkdir -p "$(dirname "${target_dir}")"
   mv "${extracted_dir}" "${target_dir}"
-  rm -rf "${tmp_extract}" "${archive}"
+  rm -rf "${tmp_extract}"
 }
 
-restore_workspace_from_bundle() {
-  local bundle="$1"
+download_system_package() {
   require_command tar
   require_command find
-
-  restore_repo_archive_from_bundle "${bundle}" "${system_repo}" "${system_dir}" || return 1
-  restore_repo_archive_from_bundle "${bundle}" "${app_configs_repo}" "${app_configs_dir}" || return 1
-  if [[ ! -d "${release_console_dir}/k8s/overlays/prod" ]]; then
-    restore_repo_archive_from_bundle "${bundle}" "${legacy_release_console_repo}" "${legacy_release_console_dir}" || true
-  fi
-  info "Restored workspace repositories from offline asset bundle"
-}
-
-ensure_workspace() {
   require_command curl
-  require_command tar
-  require_command find
 
   mkdir -p "${workspace_root}" "${download_root}"
+  info "Downloading ${system_repo} package"
+  download_url "${system_package_url}" "${download_root}/${system_package_name}"
+  extract_archive_to_dir "${download_root}/${system_package_name}" "${system_dir}"
+}
 
-  info "Downloading ${system_repo}@${system_ref}"
-  download_repo_archive "${system_repo}" "${system_ref}" "${system_dir}"
-  if [[ ! -d "${release_console_dir}/k8s/overlays/prod" ]]; then
-    info "Downloading legacy ${legacy_release_console_repo}@${legacy_release_console_ref}"
-    download_repo_archive "${legacy_release_console_repo}" "${legacy_release_console_ref}" "${legacy_release_console_dir}"
+ensure_app_configs_workspace() {
+  if [[ -f "${app_configs_dir}/apps/apps.json" ]]; then
+    return 0
   fi
+
+  require_command tar
+  require_command find
+  require_command curl
+  mkdir -p "${workspace_root}" "${download_root}"
   info "Downloading ${app_configs_repo}@${app_configs_ref}"
   download_repo_archive "${app_configs_repo}" "${app_configs_ref}" "${app_configs_dir}"
 }
@@ -267,10 +220,6 @@ ensure_workspace() {
 resolve_release_console_dir() {
   if [[ -d "${release_console_dir}/k8s/overlays/prod" ]]; then
     printf '%s\n' "${release_console_dir}"
-    return 0
-  fi
-  if [[ -d "${legacy_release_console_dir}/k8s/overlays/prod" ]]; then
-    printf '%s\n' "${legacy_release_console_dir}"
     return 0
   fi
   return 1
@@ -285,13 +234,7 @@ install_local_kadmctl() {
 prepare_phase() {
   info "Downloading offline asset bundle"
   download_url "${asset_bundle_url}" "${bundle_path}"
-
-  if ! restore_workspace_from_bundle "${bundle_path}"; then
-    if bundle_declares_complete "${bundle_path}"; then
-      die "complete offline bundle is missing cache/repos workspace archives"
-    fi
-    ensure_workspace
-  fi
+  download_system_package
 
   info "Importing offline asset bundle"
   "${system_dir}/bin/kadmctl" import-assets "${bundle_path}"
@@ -307,9 +250,12 @@ deploy_phase() {
   [[ -x "${system_dir}/bin/kadmctl" ]] || die "missing ${system_dir}/bin/kadmctl; run prepare first"
   local active_release_console_dir
   active_release_console_dir="$(resolve_release_console_dir)" || die "missing release console overlay at ${release_console_dir}/k8s/overlays/prod"
-  [[ -f "${app_configs_dir}/apps/apps.json" ]] || die "missing app configs at ${app_configs_dir}/apps/apps.json"
   [[ -n "${access_host}" ]] || die "deploy requires --access-host <ssh-target>"
   [[ -n "${KADM_GITHUB_TOKEN:-}" ]] || die "deploy requires KADM_GITHUB_TOKEN in the environment"
+  case "${ingress_mode}" in
+    gateway|traefik) ;;
+    *) die "--ingress-mode must be gateway or traefik" ;;
+  esac
 
   local deploy_args=(
     --name "${cluster_name}"
@@ -335,6 +281,8 @@ deploy_phase() {
   info "Deploying local K3s control plane and platform components"
   "${system_dir}/bin/kadmctl" deploy "${deploy_args[@]}"
 
+  ensure_app_configs_workspace
+  [[ -f "${app_configs_dir}/apps/apps.json" ]] || die "missing app configs at ${app_configs_dir}/apps/apps.json"
   info "Configuring release console and GitOps repositories"
   KADM_GITHUB_TOKEN="${KADM_GITHUB_TOKEN}" \
     KADM_ARGOCD_TOKEN="${KADM_ARGOCD_TOKEN:-}" \
@@ -343,6 +291,7 @@ deploy_phase() {
     "${system_dir}/bin/kadmctl" configure-delivery "${cluster_name}" \
       --onecd-overlay "${active_release_console_dir}/k8s/overlays/prod" \
       --app-configs-dir "${app_configs_dir}" \
+      --ingress-mode "${ingress_mode}" \
       --apply
 
   info "deploy completed"

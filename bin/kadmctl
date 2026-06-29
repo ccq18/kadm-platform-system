@@ -45,12 +45,13 @@ Usage:
   kadmctl import-assets <path>
   kadmctl publish-release-console [--repo-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
   kadmctl publish-onecd [--onecd-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
-  kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--app-configs-dir <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--dry-run|--apply]
+  kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--app-configs-dir <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--ingress-mode <gateway|traefik>] [--dry-run|--apply]
   kadmctl configure-demo-apps [cluster] [--app-configs-dir <path>] [--db-ssh-target <ssh-target>] [--db-node-ip <ip>] [--dry-run|--apply]
   kadmctl configure-cluster-dns [cluster] [--upstream <ip>]... [--dry-run|--apply]
   kadmctl connect [cluster] [--api-port <port>] [--console-port <port>] [--dry-run]
   kadmctl status [cluster] [--api-port <port>]
   kadmctl reset-node <ssh-target> [--dry-run|--apply]
+  kadmctl reset-cluster --node <ssh-target>... [--dry-run|--apply]
   kadmctl cleanup-legacy-onecd [cluster] [--api-port <port>] [--dry-run|--apply]
   kadmctl help
 
@@ -68,6 +69,7 @@ Examples:
   kadmctl connect home-prod
   kadmctl status home-prod
   kadmctl reset-node root@1.2.3.4 --apply
+  kadmctl reset-cluster --node root@1.2.3.4 --node root@1.2.3.5 --apply
   kadmctl cleanup-legacy-onecd home-prod --apply
   kadmctl connect --dry-run
 
@@ -77,6 +79,7 @@ Safety:
   deploy defaults to --dry-run. Local changes require --apply.
   deploy consumes cached component assets. Run prepare-assets or import-assets before deploy.
   reset-node defaults to --dry-run. Remote cleanup requires --apply.
+  reset-cluster defaults to --dry-run. Remote cleanup requires --apply.
   connect uses SSH tunnel by default; Kubernetes API does not need public exposure.
 USAGE
 }
@@ -425,6 +428,57 @@ REMOTE
   info "node reset completed"
 }
 
+cmd_reset_cluster() {
+  local apply=0
+  local nodes=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --node)
+        nodes+=("${2:-}")
+        shift 2
+        ;;
+      --apply)
+        apply=1
+        shift
+        ;;
+      --dry-run)
+        apply=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      --*)
+        die "unknown reset-cluster option: $1"
+        ;;
+      *)
+        die "unexpected reset-cluster argument: $1"
+        ;;
+    esac
+  done
+
+  [[ "${#nodes[@]}" -gt 0 ]] || die "reset-cluster requires at least one --node <ssh-target>"
+
+  local node
+  for node in "${nodes[@]}"; do
+    validate_ssh_target "${node}"
+  done
+
+  if [[ "${apply}" -ne 1 ]]; then
+    info "DRY RUN: no remote cleanup will be made"
+    info "nodes: ${nodes[*]}"
+    info "removes: K3s server/agent services and data directories on each node"
+    return 0
+  fi
+
+  for node in "${nodes[@]}"; do
+    cmd_reset_node "${node}" --apply
+  done
+  info "cluster reset completed"
+}
+
 cmd_prepare_assets() {
   local apply=0
   local refresh=0
@@ -573,6 +627,7 @@ cmd_import_assets() {
 
   mkdir -p "$(state_root)"
   rm -rf "$(metadata_cache_dir)"
+  rm -rf "$(repo_cache_dir)"
   tar -xzf "${archive}" -C "$(state_root)"
   if [[ ! -d "$(manifest_cache_dir)" || ! -d "$(chart_cache_dir)" ]]; then
     die "offline asset bundle must contain cache/manifests and cache/charts entries"
@@ -588,8 +643,6 @@ cmd_import_assets() {
     [[ -s "$(runtime_images_archive_path)" ]] || die "complete offline bundle missing $(runtime_images_archive_path)"
     [[ -s "$(runtime_images_list_path)" ]] || die "complete offline bundle missing $(runtime_images_list_path)"
     [[ -s "$(runtime_images_checksum_path)" ]] || die "complete offline bundle missing $(runtime_images_checksum_path)"
-    [[ -s "$(repo_cache_dir)/kadm-platform-system.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-platform-system.tgz"
-    [[ -s "$(repo_cache_dir)/kadm-app-configs.tgz" ]] || die "complete offline bundle missing $(repo_cache_dir)/kadm-app-configs.tgz"
     info "offline bundle mode: complete"
   else
     info "offline bundle mode: partial"
@@ -1078,6 +1131,30 @@ ssh_host_part() {
   echo "${without_user%%:*}"
 }
 
+ensure_ssh_known_host() {
+  local ssh_target="$1"
+  local host known_hosts
+  host="$(ssh_host_part "${ssh_target}")"
+  [[ -n "${host}" ]] || return 0
+  if is_local_address "${host}"; then
+    return 0
+  fi
+
+  known_hosts="${HOME}/.ssh/known_hosts"
+  mkdir -p "$(dirname "${known_hosts}")"
+  chmod 700 "$(dirname "${known_hosts}")"
+  touch "${known_hosts}"
+  chmod 600 "${known_hosts}"
+
+  if command -v ssh-keygen >/dev/null 2>&1 && ssh-keygen -F "${host}" -f "${known_hosts}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  require_command ssh-keyscan
+  info "Adding SSH host key for ${host}"
+  ssh-keyscan -H -T 10 "${host}" >> "${known_hosts}" 2>/dev/null || die "failed to scan SSH host key for ${host}"
+}
+
 local_ipv4_addresses() {
   if command -v ip >/dev/null 2>&1; then
     ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1
@@ -1423,6 +1500,42 @@ install_component_commands() {
   wait_for_deployment_ready "${kubeconfig_path}" argo-rollouts argo-rollouts 600
 }
 
+emit_stale_cilium_iptables_cleanup_script() {
+  cat <<'REMOTE'
+set -eu
+
+if ! command -v iptables >/dev/null 2>&1 || ! command -v iptables-save >/dev/null 2>&1; then
+  exit 0
+fi
+
+for table in nat filter mangle raw; do
+  chains="$(iptables-save -t "${table}" 2>/dev/null | awk '/^:OLD_CILIUM_/ { sub(/^:/, "", $1); print $1 }' || true)"
+  [ -n "${chains}" ] || continue
+
+  for chain in ${chains}; do
+    for parent in PREROUTING INPUT FORWARD OUTPUT POSTROUTING; do
+      while iptables -t "${table}" -D "${parent}" -j "${chain}" 2>/dev/null; do
+        :
+      done
+    done
+    iptables -t "${table}" -F "${chain}" 2>/dev/null || true
+    iptables -t "${table}" -X "${chain}" 2>/dev/null || true
+  done
+done
+REMOTE
+}
+
+cleanup_local_stale_cilium_iptables_chains() {
+  info "Cleaning stale Cilium iptables backup chains"
+  emit_stale_cilium_iptables_cleanup_script | sudo sh -s
+}
+
+cleanup_remote_stale_cilium_iptables_chains() {
+  local ssh_target="$1"
+  info "Cleaning stale Cilium iptables backup chains on ${ssh_target}"
+  emit_stale_cilium_iptables_cleanup_script | ssh "${ssh_target}" sudo sh -s
+}
+
 apply_cluster_dns_upstreams() {
   local kubeconfig_path="$1"
   shift
@@ -1520,6 +1633,8 @@ install_base_components() {
   require_command kubectl
   ensure_helm
 
+  cleanup_remote_stale_cilium_iptables_chains "${ssh_target}"
+
   info "Starting temporary Kubernetes API tunnel"
   local tunnel_pid
   tunnel_pid="$(start_api_tunnel "${ssh_target}" "${api_port}")"
@@ -1556,6 +1671,11 @@ emit_argocd_rollout_health_patch_yaml() {
 data:
   resource.customizations.health.argoproj.io_Rollout: |
 $(sed 's/^/    /' "${lua_file}")
+  resource.customizations.health.gateway.networking.k8s.io_HTTPRoute: |
+    hs = {}
+    hs.status = "Healthy"
+    hs.message = "HTTPRoute is accepted as GitOps intent. Traefik mode uses Ingress for public HTTP."
+    return hs
 YAML
 }
 
@@ -1592,10 +1712,154 @@ fi)
 YAML
 }
 
+list_registry_httproute_hosts() {
+  local apps_file="$1"
+  local app_configs_dir="$2"
+  python3 - "${apps_file}" "${app_configs_dir}" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+HOST_RE = re.compile(r"^[A-Za-z0-9.*-]+$")
+
+def require(app, index, path):
+    value = app
+    for part in path.split("."):
+        if not isinstance(value, dict) or not value.get(part):
+            raise ValueError(f"app[{index}].{path} is required")
+        value = value[part]
+    return value
+
+def base_path(gitops_path):
+    marker = "/overlays/"
+    if marker in gitops_path:
+        return gitops_path.split(marker, 1)[0]
+    return str(pathlib.Path(gitops_path).parent.parent)
+
+def clean_hostname(value):
+    value = value.strip().strip("\"'")
+    if not value:
+        return ""
+    if not HOST_RE.match(value):
+        raise ValueError(f"unsupported HTTPRoute hostname: {value}")
+    return value
+
+def parse_inline_list(value):
+    value = value.strip()
+    if not (value.startswith("[") and value.endswith("]")):
+        return []
+    hosts = []
+    for item in value[1:-1].split(","):
+        host = clean_hostname(item)
+        if host:
+            hosts.append(host)
+    return hosts
+
+def httproute_hosts(path):
+    hosts = []
+    in_hostnames = False
+    host_indent = 0
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        if in_hostnames:
+            if indent <= host_indent and not stripped.startswith("- "):
+                in_hostnames = False
+            elif stripped.startswith("- "):
+                host = clean_hostname(stripped[2:])
+                if host:
+                    hosts.append(host)
+                continue
+        if stripped.startswith("hostnames:"):
+            host_indent = indent
+            value = stripped.split(":", 1)[1]
+            inline_hosts = parse_inline_list(value)
+            if inline_hosts:
+                hosts.extend(inline_hosts)
+                in_hostnames = False
+            else:
+                in_hostnames = True
+    return hosts
+
+try:
+    apps_file = pathlib.Path(sys.argv[1])
+    root = pathlib.Path(sys.argv[2])
+    apps = json.loads(apps_file.read_text(encoding="utf-8"))
+    if not isinstance(apps, list):
+        raise ValueError("apps config must be an array")
+    seen = set()
+    for index, app in enumerate(apps):
+        gitops_path = require(app, index, "gitops.path")
+        route_file = root / base_path(gitops_path) / "base" / "httproute.yaml"
+        if not route_file.exists():
+            continue
+        for host in httproute_hosts(route_file):
+            if host not in seen:
+                seen.add(host)
+                print(host)
+except Exception as exc:
+    print(f"apps registry error: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+apply_traefik_app_ingresses() {
+  local kubeconfig_path="$1"
+  local app_configs_dir="$2"
+  local apps_file="${app_configs_dir}/apps/apps.json"
+  local ingress_list ingress_file
+
+  ingress_list="$(mktemp)"
+  if ! python3 - "${apps_file}" "${app_configs_dir}" > "${ingress_list}" <<'PY'
+import json
+import pathlib
+import sys
+
+def require(app, index, path):
+    value = app
+    for part in path.split("."):
+        if not isinstance(value, dict) or not value.get(part):
+            raise ValueError(f"app[{index}].{path} is required")
+        value = value[part]
+    return value
+
+try:
+    apps_file = pathlib.Path(sys.argv[1])
+    root = pathlib.Path(sys.argv[2])
+    apps = json.loads(apps_file.read_text(encoding="utf-8"))
+    if not isinstance(apps, list):
+        raise ValueError("apps config must be an array")
+    for index, app in enumerate(apps):
+        path = require(app, index, "gitops.path")
+        marker = "/overlays/"
+        base = path.split(marker, 1)[0] if marker in path else str(pathlib.Path(path).parent.parent)
+        print(root / base / "base" / "ingress.yaml")
+except Exception as exc:
+    print(f"apps registry error: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    rm -f "${ingress_list}"
+    return 1
+  fi
+
+  while IFS= read -r ingress_file; do
+    [[ -n "${ingress_file}" ]] || continue
+    [[ -f "${ingress_file}" ]] || die "Traefik ingress file not found: ${ingress_file}"
+    kubectl_apply_retry "${kubeconfig_path}" -f "${ingress_file}"
+  done < "${ingress_list}"
+  rm -f "${ingress_list}"
+}
+
 emit_gateway_tls_secret_yaml() {
-  local wildcard_domain="$1"
-  local secret_name="${2:-apps-gateway-tls}"
+  local secret_name="$1"
+  shift
+  local dns_names=("$@")
   local tmp_dir cert_file key_file config_file
+  [[ "${#dns_names[@]}" -gt 0 ]] || die "at least one Gateway TLS DNS name is required"
   tmp_dir="$(mktemp -d)"
   cert_file="${tmp_dir}/tls.crt"
   key_file="${tmp_dir}/tls.key"
@@ -1608,15 +1872,19 @@ x509_extensions = v3_req
 prompt = no
 
 [req_distinguished_name]
-CN = ${wildcard_domain}
+CN = ${dns_names[0]}
 
 [v3_req]
 subjectAltName = @alt_names
 
 [alt_names]
-DNS.1 = ${wildcard_domain}
-DNS.2 = *.${wildcard_domain}
 EOF
+  local index dns_name
+  index=1
+  for dns_name in "${dns_names[@]}"; do
+    printf 'DNS.%s = %s\n' "${index}" "${dns_name}" >> "${config_file}"
+    index=$((index + 1))
+  done
 
   openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout "${key_file}" \
@@ -1952,27 +2220,130 @@ spec:
 YAML
 }
 
+release_console_gitops_source() {
+  local overlay_path="${1%/}"
+  case "${overlay_path}" in
+    */kadm-release-console/k8s/overlays/prod)
+      printf 'kadm-release-console\thttps://github.com/ccq18/kadm-release-console.git\tk8s/overlays/prod\n'
+      ;;
+    *)
+      printf 'kadm-platform-system\thttps://github.com/ccq18/kadm-platform-system.git\tconsole/k8s/overlays/prod\n'
+      ;;
+  esac
+}
+
 list_registry_apps() {
   local apps_file="$1"
   python3 - "${apps_file}" <<'PY'
 import json
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    apps = json.load(handle)
+def require(app, index, path):
+    value = app
+    for part in path.split("."):
+        if not isinstance(value, dict) or not value.get(part):
+            raise ValueError(f"app[{index}].{path} is required")
+        value = value[part]
+    return str(value)
 
-for app in apps:
-    fields = [
-        app["id"],
-        app["argocd"]["application"],
-        app["gitops"]["owner"],
-        app["gitops"]["repo"],
-        app["gitops"]["path"],
-        app["gitops"].get("ref", "main"),
-        app["rollout"]["namespace"],
-    ]
-    print("\t".join(fields))
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        apps = json.load(handle)
+    if not isinstance(apps, list):
+        raise ValueError("apps config must be an array")
+    for index, app in enumerate(apps):
+        fields = [
+            require(app, index, "id"),
+            require(app, index, "argocd.application"),
+            require(app, index, "gitops.owner"),
+            require(app, index, "gitops.repo"),
+            require(app, index, "gitops.path"),
+            str(app.get("gitops", {}).get("ref") or "main"),
+            require(app, index, "rollout.namespace"),
+        ]
+        print("\t".join(fields))
+except Exception as exc:
+    print(f"apps registry error: {exc}", file=sys.stderr)
+    sys.exit(1)
 PY
+}
+
+list_registry_images() {
+  local apps_file="$1"
+  local app_configs_dir="$2"
+  python3 - "${apps_file}" "${app_configs_dir}" <<'PY'
+import json
+import pathlib
+import sys
+
+def require(app, index, path):
+    value = app
+    for part in path.split("."):
+        if not isinstance(value, dict) or not value.get(part):
+            raise ValueError(f"app[{index}].{path} is required")
+        value = value[part]
+    return value
+
+try:
+    apps_file = pathlib.Path(sys.argv[1])
+    root = pathlib.Path(sys.argv[2])
+    apps = json.loads(apps_file.read_text(encoding="utf-8"))
+    if not isinstance(apps, list):
+        raise ValueError("apps config must be an array")
+    for index, app in enumerate(apps):
+        image = require(app, index, "gitops.image")
+        path = require(app, index, "gitops.path")
+        kustomization = root / path / "kustomization.yaml"
+        if not kustomization.exists():
+            raise ValueError(f"{path}/kustomization.yaml is required")
+        tag = ""
+        new_name = image
+        in_match = False
+        for line in kustomization.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- name:"):
+                in_match = stripped.split(":", 1)[1].strip().strip("\"'") == image
+                new_name = image
+            elif in_match and stripped.startswith("newName:"):
+                new_name = stripped.split(":", 1)[1].strip().strip("\"'")
+            elif in_match and stripped.startswith("newTag:"):
+                tag = stripped.split(":", 1)[1].strip().strip("\"'")
+                break
+        if not tag:
+            raise ValueError(f"{path}/kustomization.yaml must set newTag for {image}")
+        print(f"{new_name}:{tag}")
+except Exception as exc:
+    print(f"apps registry error: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+verify_ghcr_image_pull_access() {
+  local app_configs_dir="$1"
+  local apps_file="${app_configs_dir}/apps/apps.json"
+  [[ -n "${ONECD_GHCR_USERNAME:-}" ]] || return 0
+
+  require_command docker
+  if ! printf '%s' "${ONECD_GHCR_TOKEN}" | docker login ghcr.io -u "${ONECD_GHCR_USERNAME}" --password-stdin >/dev/null 2>&1; then
+    die "failed to verify GHCR image pull access: docker login ghcr.io failed for ${ONECD_GHCR_USERNAME}. Provide KADM_GHCR_USERNAME/KADM_GHCR_TOKEN with package read access."
+  fi
+
+  local image
+  local image_list
+  image_list="$(mktemp)"
+  if ! list_registry_images "${apps_file}" "${app_configs_dir}" > "${image_list}"; then
+    rm -f "${image_list}"
+    return 1
+  fi
+
+  while IFS= read -r image; do
+    [[ -n "${image}" ]] || continue
+    if ! docker manifest inspect "${image}" >/dev/null 2>&1; then
+      rm -f "${image_list}"
+      die "failed to verify GHCR image pull access for ${image}. Check that the tag exists and KADM_GHCR_TOKEN has package read access."
+    fi
+  done < "${image_list}"
+  rm -f "${image_list}"
 }
 
 emit_kadm_apps_config_yaml() {
@@ -2089,6 +2460,50 @@ wait_for_labeled_pods_ready() {
   die "timed out waiting for pods with selector ${selector}"
 }
 
+wait_for_rollout_healthy() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local name="$3"
+  local timeout_seconds="$4"
+  local deadline=$((SECONDS + timeout_seconds))
+  local state phase ready desired message
+
+  while (( SECONDS < deadline )); do
+    state="$(kubectl_for "${kubeconfig_path}" -n "${namespace}" get rollout "${name}" -o jsonpath='{.status.phase} {.status.readyReplicas} {.spec.replicas} {.status.message}' 2>/dev/null || true)"
+    phase="$(printf '%s' "${state}" | awk '{print $1}')"
+    ready="$(printf '%s' "${state}" | awk '{print $2}')"
+    desired="$(printf '%s' "${state}" | awk '{print $3}')"
+    message="$(printf '%s' "${state}" | cut -d' ' -f4-)"
+    ready="${ready:-0}"
+    desired="${desired:-0}"
+    if [[ "${phase}" == "Healthy" && "${desired}" =~ ^[0-9]+$ && "${ready}" =~ ^[0-9]+$ && "${desired}" -gt 0 && "${ready}" -ge "${desired}" ]]; then
+      info "rollout/${name} healthy: ${ready}/${desired}"
+      return 0
+    fi
+    if [[ "${phase}" == "Degraded" ]]; then
+      die "rollout/${name} degraded: ${message}"
+    fi
+    info "waiting for rollout/${name}: phase=${phase:-unknown} ready=${ready}/${desired}"
+    sleep 5
+  done
+
+  die "timed out waiting for rollout/${name}"
+}
+
+wait_for_rollout_or_pods_ready() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local rollout="$3"
+  local selector="$4"
+  local rollout_name
+  rollout_name="$(kubectl_for "${kubeconfig_path}" -n "${namespace}" get rollout "${rollout}" -o name 2>/dev/null || true)"
+  if [[ -n "${rollout_name}" ]]; then
+    wait_for_rollout_healthy "${kubeconfig_path}" "${namespace}" "${rollout}" 300
+  else
+    wait_for_labeled_pods_ready "${kubeconfig_path}" "${namespace}" "${selector}" 300
+  fi
+}
+
 configure_mysql_demo_app() {
   local ssh_target="$1"
   local secret_file="$2"
@@ -2098,6 +2513,7 @@ configure_mysql_demo_app() {
   db_name="$(extract_yaml_string_field "${secret_file}" "  DB_NAME")"
   [[ -n "${user}" && -n "${password}" && -n "${db_name}" ]] || die "failed to parse database secret file: ${secret_file}"
 
+  ensure_ssh_known_host "${ssh_target}"
   ssh "${ssh_target}" sudo sh -s <<REMOTE
 set -eu
 mysql -uroot <<'SQL'
@@ -2269,6 +2685,7 @@ cmd_deploy() {
   if [[ "${skip_components}" -ne 1 ]]; then
     require_command kubectl
     ensure_helm
+    cleanup_local_stale_cilium_iptables_chains
     install_component_commands "${kubeconfig_path}" "${gateway_api_url}" "${argocd_url}" "${rollouts_url}" "${cilium_version}" "${private_ip}"
     if [[ "${#dns_upstreams[@]}" -gt 0 ]]; then
       validate_gitops_dns "${kubeconfig_path}" "${dns_upstreams[@]}"
@@ -2435,6 +2852,7 @@ cmd_configure_delivery() {
   local app_configs_dir="${DEFAULT_APP_CONFIGS_DIR}"
   local argocd_base_url="https://argocd-server.argocd.svc.cluster.local"
   local argocd_local_port="${DEFAULT_ARGOCD_LOCAL_PORT}"
+  local ingress_mode="gateway"
   local apply=0
   local cluster_seen=0
 
@@ -2454,6 +2872,10 @@ cmd_configure_delivery() {
         ;;
       --argocd-local-port)
         argocd_local_port="${2:-}"
+        shift 2
+        ;;
+      --ingress-mode)
+        ingress_mode="${2:-}"
         shift 2
         ;;
       --apply)
@@ -2484,6 +2906,10 @@ cmd_configure_delivery() {
 
   validate_cluster_name "${cluster}"
   validate_port "${argocd_local_port}"
+  case "${ingress_mode}" in
+    gateway|traefik) ;;
+    *) die "ingress mode must be gateway or traefik" ;;
+  esac
   load_profile "${cluster}"
 
   if [[ "${apply}" -ne 1 ]]; then
@@ -2496,6 +2922,7 @@ cmd_configure_delivery() {
     info "creates: kadm/kadm-apps-config"
     info "creates: argocd repository credentials"
     info "creates: kadm/ghcr-cred when GHCR env vars are set"
+    info "ingress mode: ${ingress_mode}"
     info "deploys: KADM release console kustomize overlay at ${onecd_overlay}"
     info "apps repo: ${app_configs_dir}"
     info "temporary Argo CD port-forward: http://127.0.0.1:${argocd_local_port}"
@@ -2510,17 +2937,38 @@ cmd_configure_delivery() {
   [[ -d "${app_configs_dir}" ]] || die "KADM app configs directory not found: ${app_configs_dir}"
   [[ -f "${app_configs_dir}/apps/apps.json" ]] || die "KADM app configs file not found: ${app_configs_dir}/apps/apps.json"
 
+  local registry_preflight_file
+  registry_preflight_file="$(mktemp)"
+  if ! list_registry_apps "${app_configs_dir}/apps/apps.json" > "${registry_preflight_file}"; then
+    rm -f "${registry_preflight_file}"
+    return 1
+  fi
+  rm -f "${registry_preflight_file}"
+
   if [[ -n "${ONECD_GHCR_USERNAME:-}" || -n "${ONECD_GHCR_TOKEN:-}" ]]; then
     require_env ONECD_GHCR_USERNAME
     require_env ONECD_GHCR_TOKEN
+    verify_ghcr_image_pull_access "${app_configs_dir}"
   fi
 
   local gateway_tls_domain="${ONECD_GATEWAY_TLS_WILDCARD_DOMAIN:-}"
   local gateway_tls_secret_name=""
-  if [[ -n "${gateway_tls_domain}" ]]; then
+  local gateway_tls_names=()
+  if [[ "${ingress_mode}" == "gateway" && -n "${gateway_tls_domain}" ]]; then
+    gateway_tls_names=("${gateway_tls_domain}" "*.${gateway_tls_domain}")
+  elif [[ "${ingress_mode}" == "gateway" ]]; then
+    while IFS= read -r gateway_tls_name; do
+      [[ -n "${gateway_tls_name}" ]] || continue
+      gateway_tls_names+=("${gateway_tls_name}")
+    done < <(list_registry_httproute_hosts "${app_configs_dir}/apps/apps.json" "${app_configs_dir}")
+  fi
+  if [[ "${ingress_mode}" == "gateway" && "${#gateway_tls_names[@]}" -gt 0 ]]; then
     require_command openssl
     gateway_tls_secret_name="apps-gateway-tls"
   fi
+
+  local release_console_repo_name release_console_repo_url release_console_gitops_path
+  IFS=$'\t' read -r release_console_repo_name release_console_repo_url release_console_gitops_path < <(release_console_gitops_source "${onecd_overlay}")
 
   local tunnel_pid
   if is_local_ssh_target "${MASTER_SSH}" || is_local_address "${MASTER_PRIVATE_IP:-}"; then
@@ -2569,35 +3017,41 @@ cmd_configure_delivery() {
   set +e
   (
     set -e
-    local desired_apps_file registry_name app_name gitops_owner gitops_repo gitops_path gitops_ref rollout_namespace existing_app
+    local desired_apps_file registry_apps_file registry_name app_name gitops_owner gitops_repo gitops_path gitops_ref rollout_namespace existing_app
     desired_apps_file="$(mktemp)"
+    registry_apps_file="$(mktemp)"
     create_namespace_if_missing "${KUBECONFIG_PATH}" kadm
     create_namespace_if_missing "${KUBECONFIG_PATH}" argocd
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
     apply_argocd_rollout_health_customization "${KUBECONFIG_PATH}"
-    if [[ -n "${gateway_tls_secret_name}" ]]; then
-      emit_gateway_tls_secret_yaml "${gateway_tls_domain}" "${gateway_tls_secret_name}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    if [[ "${ingress_mode}" == "gateway" ]]; then
+      if [[ -n "${gateway_tls_secret_name}" ]]; then
+        emit_gateway_tls_secret_yaml "${gateway_tls_secret_name}" "${gateway_tls_names[@]}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+      fi
+      emit_apps_gateway_yaml "${gateway_tls_secret_name}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    else
+      apply_traefik_app_ingresses "${KUBECONFIG_PATH}" "${app_configs_dir}"
     fi
-    emit_apps_gateway_yaml "${gateway_tls_secret_name}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
 
     emit_onecd_secret_yaml "${ONECD_GITHUB_TOKEN}" "${argocd_token}" "${argocd_base_url}" "${CLUSTER_NAME}" "${K3S_JOIN_SERVER_URL:-}" "${K3S_JOIN_TOKEN:-}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_kadm_apps_config_yaml "${app_configs_dir}/apps/apps.json" "kadm-source-apps-config" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_repo_secret_yaml kadm-platform-system "https://github.com/ccq18/kadm-platform-system.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_repo_secret_yaml "${release_console_repo_name}" "${release_console_repo_url}" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
     emit_argocd_repo_secret_yaml kadm-app-configs "https://github.com/ccq18/kadm-app-configs.git" "${ONECD_GITHUB_TOKEN}" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    emit_argocd_application_yaml kadm-release-console "https://github.com/ccq18/kadm-platform-system.git" kadm "console/k8s/overlays/prod" "main" "system" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    emit_argocd_application_yaml kadm-release-console "${release_console_repo_url}" kadm "${release_console_gitops_path}" "main" "system" | apply_delivery_yaml "${KUBECONFIG_PATH}"
+    list_registry_apps "${app_configs_dir}/apps/apps.json" > "${registry_apps_file}"
     while IFS=$'\t' read -r registry_name app_name gitops_owner gitops_repo gitops_path gitops_ref rollout_namespace; do
       [[ -n "${app_name}" ]] || continue
       printf '%s\n' "${app_name}" >> "${desired_apps_file}"
       emit_argocd_application_yaml "${app_name}" "https://github.com/${gitops_owner}/${gitops_repo}.git" "${rollout_namespace}" "${gitops_path}" "${gitops_ref}" "apps-registry" | apply_delivery_yaml "${KUBECONFIG_PATH}"
-    done < <(list_registry_apps "${app_configs_dir}/apps/apps.json")
+    done < "${registry_apps_file}"
     while IFS= read -r existing_app; do
       [[ -n "${existing_app}" ]] || continue
       if ! grep -Fqx "${existing_app}" "${desired_apps_file}"; then
         kubectl_retry "${KUBECONFIG_PATH}" -n argocd delete application "${existing_app}" --ignore-not-found
       fi
     done < <(kubectl_for "${KUBECONFIG_PATH}" -n argocd get applications -l kadm.ai/managed-by=apps-registry -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
-    rm -f "${desired_apps_file}"
+    rm -f "${desired_apps_file}" "${registry_apps_file}"
     if [[ -n "${ONECD_GHCR_USERNAME:-}" ]]; then
       emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" kadm | apply_delivery_yaml "${KUBECONFIG_PATH}"
       emit_ghcr_pull_secret_yaml "${ONECD_GHCR_USERNAME}" "${ONECD_GHCR_TOKEN}" apps | apply_delivery_yaml "${KUBECONFIG_PATH}"
@@ -3001,8 +3455,8 @@ cmd_configure_demo_apps() {
 
   kubectl_retry "${KUBECONFIG_PATH}" -n apps delete pod -l app.kubernetes.io/name=hello --ignore-not-found
   kubectl_retry "${KUBECONFIG_PATH}" -n apps delete pod -l app.kubernetes.io/name=hellospring --ignore-not-found
-  wait_for_labeled_pods_ready "${KUBECONFIG_PATH}" apps "app.kubernetes.io/name=hello" 300
-  wait_for_labeled_pods_ready "${KUBECONFIG_PATH}" apps "app.kubernetes.io/name=hellospring" 300
+  wait_for_rollout_or_pods_ready "${KUBECONFIG_PATH}" apps hello "app.kubernetes.io/name=hello"
+  wait_for_rollout_or_pods_ready "${KUBECONFIG_PATH}" apps hellospring "app.kubernetes.io/name=hellospring"
 
   stop_pid "${tunnel_pid}"
   info "demo app dependencies configured"
@@ -3094,6 +3548,9 @@ main() {
       ;;
     reset-node)
       cmd_reset_node "$@"
+      ;;
+    reset-cluster)
+      cmd_reset_cluster "$@"
       ;;
     prepare-assets)
       cmd_prepare_assets "$@"

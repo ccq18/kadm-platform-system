@@ -23,7 +23,7 @@ assert_file_contains() {
   local file="$1"
   local needle="$2"
   [[ -f "${file}" ]] || fail "missing file ${file}"
-  grep -Fq "${needle}" "${file}" || {
+  grep -Fq -- "${needle}" "${file}" || {
     echo "Expected ${file} to contain ${needle}" >&2
     echo "--- ${file}" >&2
     cat "${file}" >&2
@@ -37,8 +37,8 @@ assert_file_line_order() {
   local second="$3"
   local first_line second_line
   [[ -f "${file}" ]] || fail "missing file ${file}"
-  first_line="$(grep -nF "${first}" "${file}" | head -n 1 | cut -d: -f1)"
-  second_line="$(grep -nF "${second}" "${file}" | head -n 1 | cut -d: -f1)"
+  first_line="$(grep -nF -- "${first}" "${file}" | head -n 1 | cut -d: -f1)"
+  second_line="$(grep -nF -- "${second}" "${file}" | head -n 1 | cut -d: -f1)"
   [[ -n "${first_line}" ]] || fail "missing ordered line: ${first}"
   [[ -n "${second_line}" ]] || fail "missing ordered line: ${second}"
   (( first_line < second_line )) || fail "expected ${first} before ${second}"
@@ -68,10 +68,11 @@ test_bootstrap_dry_run_prints_safe_plan() {
 }
 
 test_bootstrap_apply_writes_profile_rewrites_kubeconfig_and_installs_base_components() {
-  local tmp_home tmp_bin calls_file cache_dir chart_dir wait_state_file
+  local tmp_home tmp_bin calls_file stdin_file cache_dir chart_dir wait_state_file
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
   wait_state_file="${tmp_home}/wait-state"
   cache_dir="${tmp_home}/.kadm/cache/manifests"
   chart_dir="${tmp_home}/.kadm/cache/charts"
@@ -89,7 +90,7 @@ YAML
   done
   printf 'gateway.networking.k8s.io/channel: experimental\n' >> "${cache_dir}/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
   printf 'chart' > "${chart_dir}/cilium-1.19.5.tgz"
-  cat > "${tmp_bin}/ssh" <<'STUB'
+cat > "${tmp_bin}/ssh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'ssh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
@@ -98,6 +99,9 @@ if [[ "$*" == *"-N -L"* ]]; then
   while true; do
     sleep 1
   done
+fi
+if [[ -n "${ONECDCTL_TEST_STDIN:-}" ]]; then
+  cat >> "${ONECDCTL_TEST_STDIN}"
 fi
 if [[ "$*" == *"cat /etc/rancher/k3s/k3s.yaml"* ]]; then
   cat <<'KUBECONFIG'
@@ -149,6 +153,10 @@ if [[ "$*" == *"get deploy argocd-server"* && "$*" == *"jsonpath"* ]]; then
   printf '1 1'
   exit 0
 fi
+if [[ "$*" == *"get deploy argocd-repo-server"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
 if [[ "$*" == *"get deploy argo-rollouts"* && "$*" == *"jsonpath"* ]]; then
   printf '1 1'
   exit 0
@@ -173,7 +181,7 @@ STUB
   chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/helm" "${tmp_bin}/curl"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_WAIT_STATE="${wait_state_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" bootstrap root@203.0.113.11 --name home-prod --private-ip 10.0.0.11 --api-port 16445 --console-port 18081 --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_WAIT_STATE="${wait_state_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" bootstrap root@203.0.113.11 --name home-prod --private-ip 10.0.0.11 --api-port 16445 --console-port 18081 --apply)"
 
   assert_contains "${output}" "cluster profile written"
   assert_file_contains "${tmp_home}/.kadm/clusters/home-prod/cluster.env" "CLUSTER_NAME=home-prod"
@@ -188,15 +196,20 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s delete validatingadmissionpolicy safe-upgrades.gateway.networking.k8s.io --ignore-not-found"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s wait --for=condition=Established crd/tlsroutes.gateway.networking.k8s.io --timeout=180s"
   [[ "$(grep -Fc "wait --for=condition=Established crd/gatewayclasses.gateway.networking.k8s.io" "${calls_file}")" -ge 2 ]] || fail "Gateway API CRD wait was not retried"
+  assert_file_contains "${calls_file}" "ssh root@203.0.113.11 sudo sh -s"
+  assert_file_contains "${stdin_file}" "OLD_CILIUM_"
+  assert_file_contains "${stdin_file}" "iptables-save -t"
+  assert_file_line_order "${calls_file}" "ssh root@203.0.113.11 sudo sh -s" "helm --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml upgrade --install cilium"
   assert_file_contains "${calls_file}" "helm --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml upgrade --install cilium ${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz --timeout 10m --disable-openapi-validation"
   assert_file_contains "${calls_file}" "--set gatewayAPI.enabled=true"
   assert_file_contains "${calls_file}" "--set gatewayAPI.hostNetwork.enabled=true"
   assert_file_contains "${calls_file}" "--set envoy.enabled=true"
   assert_file_contains "${calls_file}" "--set envoy.securityContext.capabilities.keepCapNetBindService=true"
-  assert_file_contains "${calls_file}" "--set envoy.securityContext.capabilities.envoy[0]=NET_BIND_SERVICE"
+  assert_file_contains "${calls_file}" "--set envoy.securityContext.capabilities.envoy[2]=NET_BIND_SERVICE"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kube-system get daemonset cilium -o jsonpath="
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -n argocd -f ${tmp_home}/.kadm/cache/manifests/"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get deploy argocd-server -o jsonpath="
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get deploy argocd-repo-server -o jsonpath="
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply --server-side --force-conflicts -n argo-rollouts -f ${tmp_home}/.kadm/cache/manifests/"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argo-rollouts get deploy argo-rollouts -o jsonpath="
   if grep -Fq "rollout status" "${calls_file}"; then
@@ -285,6 +298,10 @@ if [[ "$*" == *"get daemonset cilium"* && "$*" == *"jsonpath"* ]]; then
   exit 0
 fi
 if [[ "$*" == *"get deploy argocd-server"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
+if [[ "$*" == *"get deploy argocd-repo-server"* && "$*" == *"jsonpath"* ]]; then
   printf '1 1'
   exit 0
 fi
@@ -404,6 +421,10 @@ if [[ "$*" == *"get deploy argocd-server"* && "$*" == *"jsonpath"* ]]; then
   printf '1 1'
   exit 0
 fi
+if [[ "$*" == *"get deploy argocd-repo-server"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
 if [[ "$*" == *"get deploy argo-rollouts"* && "$*" == *"jsonpath"* ]]; then
   printf '1 1'
   exit 0
@@ -443,10 +464,11 @@ STUB
 }
 
 test_deploy_apply_imports_runtime_images_before_components() {
-  local tmp_home tmp_bin calls_file cache_dir chart_dir k3s_dir image_dir metadata_dir
+  local tmp_home tmp_bin calls_file stdin_file cache_dir chart_dir k3s_dir image_dir metadata_dir
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
   cache_dir="${tmp_home}/.kadm/cache/manifests"
   chart_dir="${tmp_home}/.kadm/cache/charts"
   k3s_dir="${tmp_home}/.kadm/cache/k3s"
@@ -501,7 +523,11 @@ if [[ "$*" == *"k3s ctr -n k8s.io images ls -q"* ]]; then
   printf 'quay.io/argoproj/argocd:v3.4.4\n'
   exit 0
 fi
-cat >/dev/null || true
+if [[ -n "${ONECDCTL_TEST_STDIN:-}" ]]; then
+  cat >> "${ONECDCTL_TEST_STDIN}" || true
+else
+  cat >/dev/null || true
+fi
 STUB
   cat > "${tmp_bin}/zstd" <<'STUB'
 #!/usr/bin/env bash
@@ -530,11 +556,15 @@ STUB
   chmod +x "${tmp_bin}/sudo" "${tmp_bin}/zstd" "${tmp_bin}/kubectl"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" deploy --name home-prod --access-host root@127.0.0.1 --private-ip 10.0.0.11 --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" deploy --name home-prod --access-host root@127.0.0.1 --private-ip 10.0.0.11 --apply)"
 
   assert_contains "${output}" "Importing runtime container images"
   assert_file_contains "${calls_file}" "zstd -dc ${image_dir}/runtime-images.tar.zst"
   assert_file_contains "${calls_file}" "sudo k3s ctr -n k8s.io images import -"
+  assert_file_contains "${calls_file}" "sudo sh -s"
+  assert_file_contains "${stdin_file}" "OLD_CILIUM_"
+  assert_file_contains "${stdin_file}" "iptables-save -t"
+  assert_file_line_order "${calls_file}" "sudo sh -s" "helm --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml upgrade --install cilium"
   assert_file_line_order "${calls_file}" "sudo k3s ctr -n k8s.io images import -" "helm --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml upgrade --install cilium"
 }
 
@@ -707,7 +737,7 @@ PROFILE
   assert_contains "${output}" "deploys: KADM release console kustomize overlay"
 }
 
-test_configure_delivery_apply_creates_secrets_without_token_in_arguments() {
+test_configure_delivery_traefik_mode_applies_ingress_and_httproute_health() {
   local tmp_home tmp_bin calls_file stdin_file port_ready_file tmp_app_configs
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
@@ -716,7 +746,223 @@ test_configure_delivery_apply_creates_secrets_without_token_in_arguments() {
   port_ready_file="${tmp_home}/argocd-port-ready"
   tmp_app_configs="$(mktemp -d)"
   mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${tmp_home}/onecd-overlay"
-  mkdir -p "${tmp_app_configs}/apps"
+  mkdir -p "${tmp_app_configs}/apps/demo-hello/base" "${tmp_app_configs}/apps/demo-hello/overlays/prod"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_app_configs}/apps/apps.json" <<'JSON'
+[
+  {
+    "id": "demo-hello",
+    "name": "Demo Hello",
+    "gitops": {
+      "owner": "ccq18",
+      "repo": "kadm-app-configs",
+      "path": "apps/demo-hello/overlays/prod",
+      "image": "ghcr.io/ccq18/demo-hello",
+      "ref": "main"
+    },
+    "argocd": {
+      "application": "demo-hello"
+    },
+    "rollout": {
+      "namespace": "apps",
+      "name": "hello"
+    }
+  }
+]
+JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/base/ingress.yaml" <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello
+  namespace: apps
+spec:
+  ingressClassName: traefik
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/demo-hello
+  newName: ghcr.io/ccq18/demo-hello
+  newTag: test-tag
+YAML
+
+  cat > "${tmp_bin}/ssh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"-N -L"* ]]; then
+  trap 'exit 0' TERM INT
+  while true; do sleep 1; done
+fi
+exit 0
+STUB
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get secret argocd-initial-admin-secret"* ]]; then
+  printf 'YWRtaW4tcGFzcw=='
+  exit 0
+fi
+if [[ "$*" == *"patch configmap argocd-cm"* && "$*" == *"--patch-file"* ]]; then
+  cat "${@: -1}" >> "${ONECDCTL_TEST_STDIN}"
+  exit 0
+fi
+if [[ "$*" == *"get statefulset argocd-application-controller"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
+if [[ "$*" == *"get deploy kadm"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
+if [[ "$*" == *"port-forward svc/argocd-server"* ]]; then
+  touch "${ONECDCTL_TEST_PORT_READY}"
+  printf 'Forwarding from 127.0.0.1:18081 -> 80\n'
+  trap 'exit 0' TERM INT
+  while true; do sleep 1; done
+fi
+if [[ "$*" == *"apply -f "* ]]; then
+  file="${@: -1}"
+  if [[ "${file}" == "-" ]]; then
+    cat >> "${ONECDCTL_TEST_STDIN}"
+  else
+    cat "${file}" >> "${ONECDCTL_TEST_STDIN}"
+  fi
+fi
+if [[ "$*" == *"create namespace"* ]]; then
+  printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test\n'
+fi
+exit 0
+STUB
+  cat > "${tmp_bin}/curl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+[[ -f "${ONECDCTL_TEST_PORT_READY}" ]] || exit 7
+cat >/dev/null
+printf '{"token":"generated-argocd-token"}'
+STUB
+  cat > "${tmp_bin}/docker" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == "login ghcr.io -u ccq18 --password-stdin" ]]; then
+  cat >/dev/null
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl" "${tmp_bin}/docker"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" configure-delivery home-prod --ingress-mode traefik --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
+
+  assert_contains "${output}" "delivery configuration applied"
+  assert_file_contains "${calls_file}" "docker login ghcr.io -u ccq18 --password-stdin"
+  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello:test-tag"
+  assert_file_contains "${stdin_file}" "resource.customizations.health.argoproj.io_Rollout"
+  assert_file_contains "${stdin_file}" "resource.customizations.health.gateway.networking.k8s.io_HTTPRoute"
+  assert_file_contains "${stdin_file}" "kind: Ingress"
+  assert_file_contains "${stdin_file}" "ingressClassName: traefik"
+  if grep -Fq "kind: Gateway" "${stdin_file}" || grep -Fq "gatewayClassName: cilium" "${stdin_file}"; then
+    fail "traefik delivery mode applied Gateway resources"
+  fi
+}
+
+test_configure_delivery_fails_fast_when_ghcr_preflight_fails() {
+  local tmp_home tmp_bin calls_file tmp_app_configs
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  tmp_app_configs="$(mktemp -d)"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${tmp_home}/onecd-overlay"
+  mkdir -p "${tmp_app_configs}/apps/demo-hello/overlays/prod"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_app_configs}/apps/apps.json" <<'JSON'
+[
+  {
+    "id": "demo-hello",
+    "name": "Demo Hello",
+    "gitops": {
+      "owner": "ccq18",
+      "repo": "kadm-app-configs",
+      "path": "apps/demo-hello/overlays/prod",
+      "image": "ghcr.io/ccq18/demo-hello",
+      "ref": "main"
+    },
+    "argocd": {
+      "application": "demo-hello"
+    },
+    "rollout": {
+      "namespace": "apps",
+      "name": "hello"
+    }
+  }
+]
+JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/demo-hello
+  newName: ghcr.io/ccq18/demo-hello
+  newTag: missing-tag
+YAML
+  cat > "${tmp_bin}/docker" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == "login ghcr.io -u ccq18 --password-stdin" ]]; then
+  cat >/dev/null
+  exit 0
+fi
+exit 1
+STUB
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+exit 0
+STUB
+  chmod +x "${tmp_bin}/docker" "${tmp_bin}/kubectl"
+
+  local output status
+  set +e
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="bad-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply 2>&1)"
+  status="$?"
+  set -e
+
+  [[ "${status}" -ne 0 ]] || fail "configure-delivery succeeded with invalid GHCR credentials"
+  assert_contains "${output}" "failed to verify GHCR image pull access"
+  assert_contains "${output}" "ghcr.io/ccq18/demo-hello:missing-tag"
+  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello:missing-tag"
+}
+
+test_configure_delivery_fails_fast_on_invalid_app_registry() {
+  local tmp_home tmp_bin calls_file tmp_app_configs
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  tmp_app_configs="$(mktemp -d)"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${tmp_home}/onecd-overlay" "${tmp_app_configs}/apps"
   cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
@@ -744,6 +990,174 @@ PROFILE
       "namespace": "apps",
       "name": "hello"
     }
+  }
+]
+JSON
+  for tool in ssh kubectl curl docker; do
+    cat > "${tmp_bin}/${tool}" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s %s\n' "$(basename "$0")" "$*" >> "${ONECDCTL_TEST_CALLS}"
+exit 1
+STUB
+    chmod +x "${tmp_bin}/${tool}"
+  done
+
+  local output status
+  set +e
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply 2>&1)"
+  status="$?"
+  set -e
+
+  [[ "${status}" -ne 0 ]] || fail "configure-delivery succeeded with invalid app registry"
+  assert_contains "${output}" "apps registry error"
+  assert_contains "${output}" "app[0].gitops.owner is required"
+  [[ ! -s "${calls_file}" ]] || fail "configure-delivery touched external tools before app registry preflight"
+}
+
+test_configure_delivery_legacy_release_console_overlay_uses_legacy_repo_path() {
+  local tmp_home tmp_bin calls_file stdin_file tmp_app_configs overlay_dir
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
+  tmp_app_configs="$(mktemp -d)"
+  overlay_dir="${tmp_home}/kadm-release-console/k8s/overlays/prod"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${overlay_dir}"
+  mkdir -p "${tmp_app_configs}/apps/demo-hello/overlays/prod"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@127.0.0.1
+MASTER_PRIVATE_IP=127.0.0.1
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_app_configs}/apps/apps.json" <<'JSON'
+[
+  {
+    "id": "demo-hello",
+    "name": "Demo Hello",
+    "gitops": {
+      "owner": "ccq18",
+      "repo": "kadm-app-configs",
+      "path": "apps/demo-hello/overlays/prod",
+      "image": "ghcr.io/ccq18/demo-hello",
+      "ref": "main"
+    },
+    "argocd": {
+      "application": "demo-hello"
+    },
+    "rollout": {
+      "namespace": "apps",
+      "name": "hello"
+    }
+  }
+]
+JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/demo-hello
+  newName: ghcr.io/ccq18/demo-hello
+  newTag: test-tag
+YAML
+
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get --raw=/readyz"* ]]; then
+  printf 'ok\n'
+  exit 0
+fi
+if [[ "$*" == *"patch configmap argocd-cm"* && "$*" == *"--patch-file"* ]]; then
+  cat "${@: -1}" >> "${ONECDCTL_TEST_STDIN}"
+  exit 0
+fi
+if [[ "$*" == *"get statefulset argocd-application-controller"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
+if [[ "$*" == *"get deploy kadm"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
+if [[ "$*" == *"get applications"* && "$*" == *"jsonpath"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *"apply -f "* ]]; then
+  file="${@: -1}"
+  cat "${file}" >> "${ONECDCTL_TEST_STDIN}"
+fi
+if [[ "$*" == *"create namespace"* ]]; then
+  printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test\n'
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/kubectl"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_ARGOCD_TOKEN="argocd-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${overlay_dir}" --app-configs-dir "${tmp_app_configs}" --apply)"
+
+  assert_contains "${output}" "delivery configuration applied"
+  assert_file_contains "${stdin_file}" "repoURL: https://github.com/ccq18/kadm-release-console.git"
+  assert_file_contains "${stdin_file}" "path: k8s/overlays/prod"
+  if grep -Fq "path: console/k8s/overlays/prod" "${stdin_file}"; then
+    fail "legacy release console overlay emitted new system repo path"
+  fi
+}
+
+test_configure_delivery_apply_creates_secrets_without_token_in_arguments() {
+  local tmp_home tmp_bin calls_file stdin_file port_ready_file tmp_app_configs
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
+  port_ready_file="${tmp_home}/argocd-port-ready"
+  tmp_app_configs="$(mktemp -d)"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${tmp_home}/onecd-overlay"
+  mkdir -p \
+    "${tmp_app_configs}/apps/demo-hello/base" \
+    "${tmp_app_configs}/apps/demo-hello/overlays/prod" \
+    "${tmp_app_configs}/apps/demo-hello-spring/base" \
+    "${tmp_app_configs}/apps/demo-hello-spring/overlays/prod"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_app_configs}/apps/apps.json" <<'JSON'
+[
+  {
+    "id": "demo-hello",
+    "name": "Demo Hello",
+    "github": {
+      "owner": "ccq18",
+      "repo": "demo-hello",
+      "workflow": "build-and-publish.yaml",
+      "ref": "main"
+    },
+    "gitops": {
+      "owner": "ccq18",
+      "repo": "kadm-app-configs",
+      "path": "apps/demo-hello/overlays/prod",
+      "image": "ghcr.io/ccq18/demo-hello",
+      "ref": "main"
+    },
+    "argocd": {
+      "application": "demo-hello"
+    },
+    "rollout": {
+      "namespace": "apps",
+      "name": "hello"
+    }
   },
   {
     "id": "demo-hello-spring",
@@ -752,6 +1166,13 @@ PROFILE
       "owner": "ccq18",
       "repo": "demo-hello-spring",
       "workflow": "build-and-publish.yaml",
+      "ref": "main"
+    },
+    "gitops": {
+      "owner": "ccq18",
+      "repo": "kadm-app-configs",
+      "path": "apps/demo-hello-spring/overlays/prod",
+      "image": "ghcr.io/ccq18/demo-hello-spring",
       "ref": "main"
     },
     "argocd": {
@@ -764,6 +1185,40 @@ PROFILE
   }
 ]
 JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/demo-hello
+  newName: ghcr.io/ccq18/demo-hello
+  newTag: hello-test-tag
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/demo-hello-spring
+  newName: ghcr.io/ccq18/demo-hello-spring
+  newTag: spring-test-tag
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello/base/httproute.yaml" <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hello
+spec:
+  hostnames:
+    - hello.ai47.cc
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/httproute.yaml" <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hellospring
+spec:
+  hostnames:
+    - hellospring.ai47.cc
+YAML
 
   cat > "${tmp_bin}/ssh" <<'STUB'
 #!/usr/bin/env bash
@@ -823,10 +1278,51 @@ printf 'curl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
 cat >/dev/null
 printf '{"token":"generated-argocd-token"}'
 STUB
-  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl"
+  cat > "${tmp_bin}/docker" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == "login ghcr.io -u ccq18 --password-stdin" ]]; then
+  cat >/dev/null
+fi
+exit 0
+STUB
+  cat > "${tmp_bin}/openssl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'openssl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+out=""
+keyout=""
+config=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -out)
+      out="${2:-}"
+      shift 2
+      ;;
+    -keyout)
+      keyout="${2:-}"
+      shift 2
+      ;;
+    -config)
+      config="${2:-}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[[ -n "${out}" && -n "${keyout}" && -n "${config}" ]]
+cat "${config}" >> "${ONECDCTL_TEST_STDIN}"
+printf 'test-cert\n' > "${out}"
+printf 'test-key\n' > "${keyout}"
+STUB
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl" "${tmp_bin}/docker"
+  chmod +x "${tmp_bin}/openssl"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" ONECD_GATEWAY_TLS_WILDCARD_DOMAIN="ai47.cc" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" configure-delivery home-prod --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
 
   assert_contains "${output}" "delivery configuration applied"
   assert_contains "${output}" "Generating Argo CD session token for KADM release console"
@@ -834,6 +1330,8 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get secret argocd-initial-admin-secret"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18081:80"
   assert_file_contains "${calls_file}" "curl -fksSL --connect-timeout 10 --max-time 60"
+  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello:hello-test-tag"
+  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello-spring:spring-test-tag"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace kadm"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace argocd"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace apps"
@@ -856,6 +1354,9 @@ STUB
   assert_file_contains "${stdin_file}" "gatewayClassName: cilium"
   assert_file_contains "${stdin_file}" "name: apps-gateway-tls"
   assert_file_contains "${stdin_file}" "protocol: HTTPS"
+  assert_file_contains "${stdin_file}" "CN = hello.ai47.cc"
+  assert_file_contains "${stdin_file}" "DNS.1 = hello.ai47.cc"
+  assert_file_contains "${stdin_file}" "DNS.2 = hellospring.ai47.cc"
   assert_file_contains "${stdin_file}" "\"id\": \"demo-hello\""
   assert_file_contains "${stdin_file}" "name: ghcr-cred"
   assert_file_contains "${stdin_file}" "kind: Application"
@@ -1028,7 +1529,13 @@ case "${1:-}" in
 esac
 exit 0
 STUB
-  chmod +x "${tmp_bin}/git"
+  cat > "${tmp_bin}/gh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'gh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+exit 0
+STUB
+  chmod +x "${tmp_bin}/git" "${tmp_bin}/gh"
 
   local output status
   set +e
@@ -1289,7 +1796,6 @@ test_import_assets_restores_complete_bundle_metadata() {
     "${src_dir}/bundle/cache/k3s" \
     "${src_dir}/bundle/cache/tools" \
     "${src_dir}/bundle/cache/images" \
-    "${src_dir}/bundle/cache/repos" \
     "${src_dir}/bundle/metadata"
 
   printf 'gateway\n' > "${src_dir}/bundle/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
@@ -1300,8 +1806,6 @@ test_import_assets_restores_complete_bundle_metadata() {
   printf 'image archive\n' > "${src_dir}/bundle/cache/images/runtime-images.tar.zst"
   printf 'quay.io/argoproj/argocd:v3.4.4\n' > "${src_dir}/bundle/cache/images/runtime-images.txt"
   printf 'checksum\n' > "${src_dir}/bundle/cache/images/runtime-images.sha256"
-  printf 'system\n' > "${src_dir}/bundle/cache/repos/kadm-platform-system.tgz"
-  printf 'apps\n' > "${src_dir}/bundle/cache/repos/kadm-app-configs.tgz"
   cat > "${src_dir}/bundle/metadata/offline-bundle.env" <<'ENV'
 KADM_OFFLINE_BUNDLE_FORMAT=2
 KADM_OFFLINE_COMPLETE=true
@@ -1318,7 +1822,7 @@ ENV
   [[ -s "${dst_home}/.kadm/cache/metadata/offline-bundle.env" ]] || fail "import missing bundle metadata"
   [[ -s "${dst_home}/.kadm/cache/tools/helm-v3.15.4-linux-amd64.tar.gz" ]] || fail "import missing cached Helm archive"
   [[ -s "${dst_home}/.kadm/cache/images/runtime-images.tar.zst" ]] || fail "import missing runtime images archive"
-  [[ -s "${dst_home}/.kadm/cache/repos/kadm-platform-system.tgz" ]] || fail "import missing system repo archive"
+  [[ ! -e "${dst_home}/.kadm/cache/repos" ]] || fail "import left stale repo cache for base-only bundle"
 }
 
 test_import_assets_clears_stale_complete_metadata_for_partial_bundle() {
@@ -1329,12 +1833,14 @@ test_import_assets_clears_stale_complete_metadata_for_partial_bundle() {
   mkdir -p \
     "${src_dir}/bundle/cache/manifests" \
     "${src_dir}/bundle/cache/charts" \
-    "${dst_home}/.kadm/cache/metadata"
+    "${dst_home}/.kadm/cache/metadata" \
+    "${dst_home}/.kadm/cache/repos"
 
   printf 'gateway\n' > "${src_dir}/bundle/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml"
   printf 'argocd\n' > "${src_dir}/bundle/cache/manifests/https___raw.githubusercontent.com_argoproj_argo-cd_v3.4.4_manifests_install.yaml.yaml"
   printf 'rollouts\n' > "${src_dir}/bundle/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
   printf 'chart\n' > "${src_dir}/bundle/cache/charts/cilium-1.19.5.tgz"
+  printf 'stale repo\n' > "${dst_home}/.kadm/cache/repos/kadm-platform-system.tgz"
   cat > "${dst_home}/.kadm/cache/metadata/offline-bundle.env" <<'ENV'
 KADM_OFFLINE_BUNDLE_FORMAT=2
 KADM_OFFLINE_COMPLETE=true
@@ -1346,6 +1852,7 @@ ENV
 
   assert_contains "${output}" "offline bundle mode: partial"
   [[ ! -e "${dst_home}/.kadm/cache/metadata/offline-bundle.env" ]] || fail "partial import left stale complete metadata"
+  [[ ! -e "${dst_home}/.kadm/cache/repos" ]] || fail "partial import left stale repo cache"
 }
 
 test_reset_node_dry_run_is_safe() {
@@ -1384,6 +1891,33 @@ STUB
   assert_file_contains "${stdin_file}" "k3s-agent-uninstall.sh"
   assert_file_contains "${stdin_file}" "/var/lib/rancher/k3s"
   assert_file_contains "${stdin_file}" "/etc/rancher/k3s"
+}
+
+test_reset_cluster_apply_resets_each_node() {
+  local tmp_home tmp_bin calls_file stdin_file
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
+
+  cat > "${tmp_bin}/ssh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+cat >> "${ONECDCTL_TEST_STDIN}"
+STUB
+  chmod +x "${tmp_bin}/ssh"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" reset-cluster --node root@203.0.113.11 --node root@203.0.113.12 --node root@203.0.113.13 --apply)"
+
+  assert_contains "${output}" "cluster reset completed"
+  assert_file_contains "${calls_file}" "ssh root@203.0.113.11 sudo sh -s"
+  assert_file_contains "${calls_file}" "ssh root@203.0.113.12 sudo sh -s"
+  assert_file_contains "${calls_file}" "ssh root@203.0.113.13 sudo sh -s"
+  [[ "$(grep -Fc "ssh root@" "${calls_file}")" -eq 3 ]] || fail "reset-cluster did not run cleanup on all nodes"
+  assert_file_contains "${stdin_file}" "k3s-uninstall.sh"
+  assert_file_contains "${stdin_file}" "k3s-agent-uninstall.sh"
 }
 
 test_cleanup_legacy_onecd_dry_run_describes_legacy_resources() {
@@ -1638,6 +2172,12 @@ if [[ "$*" == *"-N -L"* ]]; then
 fi
 cat >> "${ONECDCTL_TEST_STDIN}"
 STUB
+  cat > "${tmp_bin}/ssh-keyscan" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh-keyscan %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+printf '203.0.113.22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG9wZW5haS1rYWRtLXRlc3QtaG9zdC1rZXkK\n'
+STUB
   cat > "${tmp_bin}/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1645,6 +2185,9 @@ printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
 if [[ "$*" == *"get --raw=/readyz"* ]]; then
   printf 'ok\n'
   exit 0
+fi
+if [[ "$*" == *"get rollout hello -o name"* || "$*" == *"get rollout hellospring -o name"* ]]; then
+  exit 1
 fi
 if [[ "$*" == *"get pods"* && "$*" == *"app.kubernetes.io/name=hello"* ]]; then
   printf 'true Running\n'
@@ -1660,13 +2203,14 @@ if [[ "$*" == *"apply -f "* ]]; then
 fi
 exit 0
 STUB
-  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl"
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/ssh-keyscan" "${tmp_bin}/kubectl"
 
   local output
   output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${tmp_apps}" --db-ssh-target root@203.0.113.22 --apply)"
 
   assert_contains "${output}" "demo app dependencies configured"
   assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
+  assert_file_contains "${calls_file}" "ssh-keyscan -H -T 10 203.0.113.22"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s apply -f "
   assert_file_contains "${calls_file}" "ssh root@203.0.113.22 sudo sh -s"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps delete pod -l app.kubernetes.io/name=hello --ignore-not-found"
@@ -1680,6 +2224,134 @@ STUB
   assert_file_contains "${stdin_file}" "IDENTIFIED BY 'hellospring_password_change_me'"
 }
 
+test_configure_demo_apps_apply_waits_for_rollout_health_when_rollouts_exist() {
+  local tmp_home tmp_apps tmp_bin calls_file stdin_file
+  tmp_home="$(mktemp -d)"
+  tmp_apps="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
+  mkdir -p "${tmp_apps}/apps/demo-hello/base" "${tmp_apps}/apps/demo-hello-spring/base"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_apps}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hello_app
+  DB_PASSWORD: hello_password_change_me
+  DB_NAME: hello_app
+YAML
+  cat > "${tmp_apps}/apps/demo-hello/base/rollout.yaml" <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  template:
+    spec:
+      containers:
+        - name: hello
+          env:
+            - name: DB_HOST
+              value: "10.120.0.6"
+YAML
+  cat > "${tmp_apps}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hellospring-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hellospring_app
+  DB_PASSWORD: hellospring_password_change_me
+  DB_NAME: hellospring_app
+YAML
+  cat > "${tmp_apps}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  template:
+    spec:
+      containers:
+        - name: hellospring
+          env:
+            - name: DB_HOST
+              value: "10.120.0.6"
+YAML
+
+  cat > "${tmp_bin}/ssh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"-N -L"* ]]; then
+  trap 'exit 0' TERM INT
+  while true; do /bin/sleep 1; done
+fi
+cat >> "${ONECDCTL_TEST_STDIN}"
+STUB
+  cat > "${tmp_bin}/ssh-keyscan" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh-keyscan %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+printf '203.0.113.22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG9wZW5haS1rYWRtLXRlc3QtaG9zdC1rZXkK\n'
+STUB
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get --raw=/readyz"* ]]; then
+  printf 'ok\n'
+  exit 0
+fi
+if [[ "$*" == *"get rollout hello -o name"* ]]; then
+  printf 'rollout.argoproj.io/hello\n'
+  exit 0
+fi
+if [[ "$*" == *"get rollout hellospring -o name"* ]]; then
+  printf 'rollout.argoproj.io/hellospring\n'
+  exit 0
+fi
+if [[ "$*" == *"get rollout hello -o jsonpath"* ]]; then
+  printf 'Healthy 2 2 rollout complete'
+  exit 0
+fi
+if [[ "$*" == *"get rollout hellospring -o jsonpath"* ]]; then
+  printf 'Healthy 1 1 rollout complete'
+  exit 0
+fi
+if [[ "$*" == *"apply -f "* ]]; then
+  file="${@: -1}"
+  cat "${file}" >> "${ONECDCTL_TEST_STDIN}"
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/ssh-keyscan" "${tmp_bin}/kubectl"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${tmp_apps}" --db-ssh-target root@203.0.113.22 --apply)"
+
+  assert_contains "${output}" "rollout/hello healthy: 2/2"
+  assert_contains "${output}" "rollout/hellospring healthy: 1/1"
+  assert_contains "${output}" "demo app dependencies configured"
+  assert_file_contains "${calls_file}" "ssh-keyscan -H -T 10 203.0.113.22"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps get rollout hello -o name"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps get rollout hello -o jsonpath="
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps get rollout hellospring -o name"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n apps get rollout hellospring -o jsonpath="
+}
+
 test_bootstrap_dry_run_prints_safe_plan
 test_bootstrap_apply_writes_profile_rewrites_kubeconfig_and_installs_base_components
 test_bootstrap_retries_transient_manifest_apply_failures
@@ -1690,6 +2362,10 @@ test_connect_waits_for_api_before_starting_port_forward
 test_status_uses_profile_and_api_tunnel
 test_bootstrap_rejects_unsafe_profile_values
 test_configure_delivery_dry_run_describes_required_inputs
+test_configure_delivery_traefik_mode_applies_ingress_and_httproute_health
+test_configure_delivery_fails_fast_when_ghcr_preflight_fails
+test_configure_delivery_fails_fast_on_invalid_app_registry
+test_configure_delivery_legacy_release_console_overlay_uses_legacy_repo_path
 test_configure_delivery_apply_creates_secrets_without_token_in_arguments
 test_publish_release_console_dry_run_prints_ci_plan
 test_publish_release_console_apply_triggers_github_actions_and_pulls_overlay
@@ -1706,10 +2382,12 @@ test_import_assets_restores_complete_bundle_metadata
 test_import_assets_clears_stale_complete_metadata_for_partial_bundle
 test_reset_node_dry_run_is_safe
 test_reset_node_apply_runs_remote_cleanup_script
+test_reset_cluster_apply_resets_each_node
 test_cleanup_legacy_onecd_dry_run_describes_legacy_resources
 test_cleanup_legacy_onecd_apply_deletes_legacy_resources
 test_connect_migrates_legacy_local_state_to_kadm_dirs
 test_configure_demo_apps_dry_run_describes_secret_and_db_setup
 test_configure_demo_apps_apply_syncs_secrets_and_mysql_users
+test_configure_demo_apps_apply_waits_for_rollout_health_when_rollouts_exist
 
 echo "kadmctl tests passed"

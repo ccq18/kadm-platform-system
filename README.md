@@ -33,6 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/boo
 
 - Release page: <https://github.com/ccq18/kadm-platform-assets/releases/tag/bundle-latest>
 - Stable asset URL: <https://github.com/ccq18/kadm-platform-assets/releases/download/bundle-latest/kadm-platform-assets.tgz>
+- System package release page: <https://github.com/ccq18/kadm-platform-system/releases/tag/system-latest>
+- Stable system package URL: <https://github.com/ccq18/kadm-platform-system/releases/download/system-latest/kadm-platform-system.tgz>
 
 如果执行安装脚本的服务器本地已有资源包：
 
@@ -53,8 +55,8 @@ curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/boo
 
 | 阶段 | 行为 |
 | --- | --- |
-| `prepare` | 下载或读取 `kadm-platform-assets.tgz`，恢复 bundle 内的 KADM 仓库，导入 `~/.kadm/cache`，安装本地工具 |
-| `deploy` | 使用本地缓存安装 K3s 和平台组件，导入 platform runtime images 到 K3s containerd，配置 Release Console 和 GitOps |
+| `prepare` | 下载或读取 `kadm-platform-assets.tgz`，再下载独立的 `kadm-platform-system` 包，导入 `~/.kadm/cache`，安装本地工具 |
+| `deploy` | 使用本地缓存安装 K3s 和平台基础组件，导入 platform runtime images 到 K3s containerd，然后单独下载 `kadm-app-configs` 并配置 Release Console 与 GitOps |
 | `all` | 先执行 `prepare`，再执行 `deploy` |
 
 `prepare` 是离线优先准备阶段。`deploy/all` 仍需要 `KADM_GITHUB_TOKEN`，因为 Release Console 需要 GitHub Actions、仓库内容和 GHCR 访问能力。不要把 token 写进命令参数或提交到仓库。
@@ -117,7 +119,7 @@ kadmctl configure-delivery kadm-test --app-configs-dir /path/to/kadm-app-configs
 
 ## 离线资源内容
 
-当前平台离线包包含：
+当前平台离线包只包含基础平台资源：
 
 - K3s install script、binary 和 airgap image bundle
 - Helm archive
@@ -125,11 +127,9 @@ kadmctl configure-delivery kadm-test --app-configs-dir /path/to/kadm-app-configs
 - Argo CD install manifest
 - Argo Rollouts install manifest
 - Cilium chart
-- 平台组件运行镜像，包括 Cilium、Argo CD、Argo Rollouts 和 KADM Release Console
-- `kadm-platform-system` 仓库归档，包含 `console/`
-- `kadm-app-configs` 仓库归档
+- 平台基础组件运行镜像，包括 Cilium、Argo CD 和 Argo Rollouts
 
-业务应用镜像不包含在该 bundle 中。
+`kadm-platform-system` 通过单独的 system package 发布；`kadm-app-configs` 在 delivery 配置阶段再单独获取。业务应用镜像也不包含在该 bundle 中。
 
 ---
 
@@ -168,6 +168,8 @@ Default bundle:
 
 - Release page: <https://github.com/ccq18/kadm-platform-assets/releases/tag/bundle-latest>
 - Stable asset URL: <https://github.com/ccq18/kadm-platform-assets/releases/download/bundle-latest/kadm-platform-assets.tgz>
+- System package release page: <https://github.com/ccq18/kadm-platform-system/releases/tag/system-latest>
+- Stable system package URL: <https://github.com/ccq18/kadm-platform-system/releases/download/system-latest/kadm-platform-system.tgz>
 
 If the bundle already exists on the server that runs the installer:
 
@@ -188,8 +190,8 @@ curl -fsSL https://raw.githubusercontent.com/ccq18/kadm-platform-system/main/boo
 
 | Phase | Behavior |
 | --- | --- |
-| `prepare` | Downloads or reads `kadm-platform-assets.tgz`, restores bundled KADM repositories, imports `~/.kadm/cache`, and installs local tools |
-| `deploy` | Uses local cache to install K3s and platform components, imports platform runtime images into K3s containerd, and configures Release Console and GitOps |
+| `prepare` | Downloads or reads `kadm-platform-assets.tgz`, then downloads the standalone `kadm-platform-system` package, imports `~/.kadm/cache`, and installs local tools |
+| `deploy` | Uses local cache to install K3s and base platform components, imports platform runtime images into K3s containerd, then fetches `kadm-app-configs` separately and configures Release Console and GitOps |
 | `all` | Runs `prepare`, then `deploy` |
 
 `prepare` is the offline-first preparation phase. `deploy/all` still require `KADM_GITHUB_TOKEN` because Release Console needs GitHub Actions, repository content, and GHCR access. Do not pass tokens as command-line arguments or commit them to Git.

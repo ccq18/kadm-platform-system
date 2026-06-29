@@ -16,7 +16,9 @@ require_command() {
 
 github_owner="${KADM_GITHUB_OWNER:-ccq18}"
 system_repo="${KADM_SYSTEM_REPO:-kadm-platform-system}"
-system_ref="${KADM_SYSTEM_REF:-main}"
+system_release_tag="${KADM_SYSTEM_RELEASE_TAG:-system-latest}"
+system_package_name="${KADM_SYSTEM_PACKAGE_NAME:-${system_repo}.tgz}"
+system_package_url="${KADM_SYSTEM_PACKAGE_URL:-https://github.com/${github_owner}/${system_repo}/releases/download/${system_release_tag}/${system_package_name}}"
 workspace_root="${KADM_CLIENT_WORKSPACE_ROOT:-${HOME}/.kadm/workspace}"
 system_dir="${workspace_root}/${system_repo}"
 client_bin_dir="${KADM_CLIENT_BIN_DIR:-${HOME}/.local/bin}"
@@ -79,51 +81,35 @@ download_url() {
   mv "${tmp}" "${output}"
 }
 
-resolve_repo_ref_sha() {
-  local repo="$1"
-  local ref="$2"
-  local response sha curl_args
-  curl_args=(
-    --http1.1
-    -fsSL
-    --retry 5
-    --retry-delay 3
-    --connect-timeout 30
-    --max-time 120
-  )
+extract_archive_to_dir() {
+  local archive="$1"
+  local target_dir="$2"
+  local tmp_extract extracted_dir
 
-  if [[ -n "${KADM_GITHUB_TOKEN:-}" ]]; then
-    curl_args+=(
-      -H "Authorization: Bearer ${KADM_GITHUB_TOKEN}"
-      -H "X-GitHub-Api-Version: 2022-11-28"
-    )
-  fi
+  require_command tar
+  require_command find
 
-  response="$(curl "${curl_args[@]}" "https://api.github.com/repos/${github_owner}/${repo}/commits/${ref}")"
-  sha="$(printf '%s\n' "${response}" | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
-  [[ -n "${sha}" ]] || die "failed to resolve ${repo}@${ref} to a commit sha"
-  printf '%s\n' "${sha}"
+  tmp_extract="$(mktemp -d)"
+  tar -xzf "${archive}" -C "${tmp_extract}"
+  extracted_dir="$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  [[ -n "${extracted_dir}" ]] || die "failed to extract ${archive}"
+
+  rm -rf "${target_dir}"
+  mkdir -p "$(dirname "${target_dir}")"
+  mv "${extracted_dir}" "${target_dir}"
+  rm -rf "${tmp_extract}" "${archive}"
 }
 
-install_system_repo() {
-  local archive tmp_extract extracted_dir resolved_sha
+install_system_package() {
+  local archive
   archive="$(mktemp)"
-  tmp_extract="$(mktemp -d)"
 
   require_command curl
   require_command tar
   require_command find
 
-  resolved_sha="$(resolve_repo_ref_sha "${system_repo}" "${system_ref}")"
-  download_url "https://api.github.com/repos/${github_owner}/${system_repo}/tarball/${resolved_sha}" "${archive}"
-  tar -xzf "${archive}" -C "${tmp_extract}"
-  extracted_dir="$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-  [[ -n "${extracted_dir}" ]] || die "failed to extract ${system_repo}@${system_ref}"
-
-  rm -rf "${system_dir}"
-  mkdir -p "$(dirname "${system_dir}")"
-  mv "${extracted_dir}" "${system_dir}"
-  rm -rf "${tmp_extract}" "${archive}"
+  download_url "${system_package_url}" "${archive}"
+  extract_archive_to_dir "${archive}" "${system_dir}"
 }
 
 install_local_kadmctl() {
@@ -185,7 +171,7 @@ main() {
   local kubeconfig_path="${HOME}/.kube/kadm/${cluster_name}.yaml"
   local profile_path="${profile_dir}/cluster.env"
 
-  install_system_repo
+  install_system_package
   install_local_kadmctl
 
   mkdir -p "${profile_dir}" "$(dirname "${kubeconfig_path}")"
