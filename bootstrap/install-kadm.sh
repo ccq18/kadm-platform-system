@@ -23,7 +23,7 @@ case "${action}" in
   prepare|deploy|all)
     ;;
   *)
-    die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]... [--ingress-mode <gateway|traefik>]"
+    die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]... [--ingress-mode <gateway|traefik>] [--demo-db-ssh-target <ssh-target>] [--demo-db-node-ip <ip>]"
     ;;
 esac
 
@@ -47,6 +47,8 @@ api_port="${KADM_API_PORT:-16443}"
 console_port="${KADM_CONSOLE_PORT:-18080}"
 k3s_version="${KADM_K3S_VERSION:-}"
 ingress_mode="${KADM_INGRESS_MODE:-gateway}"
+demo_db_ssh_target="${KADM_DEMO_DB_SSH_TARGET:-}"
+demo_db_node_ip="${KADM_DEMO_DB_NODE_IP:-}"
 dns_upstreams=()
 
 while [[ $# -gt 0 ]]; do
@@ -83,8 +85,16 @@ while [[ $# -gt 0 ]]; do
       ingress_mode="${2:-}"
       shift 2
       ;;
+    --demo-db-ssh-target)
+      demo_db_ssh_target="${2:-}"
+      shift 2
+      ;;
+    --demo-db-node-ip)
+      demo_db_node_ip="${2:-}"
+      shift 2
+      ;;
     --help|-h)
-      die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]... [--ingress-mode <gateway|traefik>]"
+      die "usage: install-kadm.sh <prepare|deploy|all> [--cluster <name>] [--access-host <ssh-target>] [--private-ip <ip>] [--api-port <port>] [--console-port <port>] [--k3s-version <version>] [--dns-upstream <ip>]... [--ingress-mode <gateway|traefik>] [--demo-db-ssh-target <ssh-target>] [--demo-db-node-ip <ip>]"
       ;;
     *)
       die "unknown option: $1"
@@ -293,6 +303,22 @@ deploy_phase() {
       --app-configs-dir "${app_configs_dir}" \
       --ingress-mode "${ingress_mode}" \
       --apply
+
+  if [[ -n "${demo_db_ssh_target}" || -n "${demo_db_node_ip}" ]]; then
+    local demo_args=(
+      "${cluster_name}"
+      --app-configs-dir "${app_configs_dir}"
+      --apply
+    )
+    if [[ -n "${demo_db_ssh_target}" ]]; then
+      demo_args+=(--db-ssh-target "${demo_db_ssh_target}")
+    fi
+    if [[ -n "${demo_db_node_ip}" ]]; then
+      demo_args+=(--db-node-ip "${demo_db_node_ip}")
+    fi
+    info "Configuring demo app dependencies"
+    "${system_dir}/bin/kadmctl" configure-demo-apps "${demo_args[@]}"
+  fi
 
   info "deploy completed"
 }

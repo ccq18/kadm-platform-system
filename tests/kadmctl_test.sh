@@ -896,7 +896,7 @@ test_configure_delivery_fails_fast_when_ghcr_preflight_fails() {
   calls_file="${tmp_home}/calls.log"
   tmp_app_configs="$(mktemp -d)"
   mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${tmp_home}/onecd-overlay"
-  mkdir -p "${tmp_app_configs}/apps/demo-hello/overlays/prod"
+  mkdir -p "${tmp_app_configs}/apps/demo-hello/overlays/prod" "${tmp_app_configs}/apps/demo-hello/base" "${tmp_app_configs}/apps/demo-hello-spring/base"
   cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
@@ -928,6 +928,30 @@ PROFILE
   }
 ]
 JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hello_app
+  DB_PASSWORD: hello_password_change_me
+  DB_NAME: hello_app
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hellospring-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hellospring_app
+  DB_PASSWORD: hellospring_password_change_me
+  DB_NAME: hellospring_app
+YAML
   cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -1034,7 +1058,7 @@ test_configure_delivery_legacy_release_console_overlay_uses_legacy_repo_path() {
   tmp_app_configs="$(mktemp -d)"
   overlay_dir="${tmp_home}/kadm-release-console/k8s/overlays/prod"
   mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${overlay_dir}"
-  mkdir -p "${tmp_app_configs}/apps/demo-hello/overlays/prod"
+  mkdir -p "${tmp_app_configs}/apps/demo-hello/overlays/prod" "${tmp_app_configs}/apps/demo-hello/base" "${tmp_app_configs}/apps/demo-hello-spring/base"
   cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@127.0.0.1
@@ -1066,6 +1090,30 @@ PROFILE
   }
 ]
 JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hello_app
+  DB_PASSWORD: hello_password_change_me
+  DB_NAME: hello_app
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hellospring-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hellospring_app
+  DB_PASSWORD: hellospring_password_change_me
+  DB_NAME: hellospring_app
+YAML
   cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -1195,6 +1243,30 @@ PROFILE
   }
 ]
 JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hello_app
+  DB_PASSWORD: hello_password_change_me
+  DB_NAME: hello_app
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hellospring-db
+  namespace: apps
+type: Opaque
+stringData:
+  DB_USER: hellospring_app
+  DB_PASSWORD: hellospring_password_change_me
+  DB_NAME: hellospring_app
+YAML
   cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -1353,6 +1425,8 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n kadm get deploy kadm -o jsonpath="
   assert_file_contains "${stdin_file}" "name: kadm-secrets"
   assert_file_contains "${stdin_file}" "name: kadm-apps-config"
+  assert_file_contains "${stdin_file}" "name: hello-db"
+  assert_file_contains "${stdin_file}" "name: hellospring-db"
   assert_file_contains "${stdin_file}" "generated-argocd-token"
   assert_file_contains "${stdin_file}" "KADM_CLUSTER_NAME"
   assert_file_contains "${stdin_file}" "K3S_JOIN_SERVER_URL"

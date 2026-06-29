@@ -2510,6 +2510,18 @@ $(sed 's/^/    /' "${apps_file}")
 YAML
 }
 
+apply_demo_secret_examples_if_present() {
+  local kubeconfig_path="$1"
+  local app_configs_dir="$2"
+  local secret_file
+  for secret_file in \
+    "${app_configs_dir}/apps/demo-hello/base/secret.example.yaml" \
+    "${app_configs_dir}/apps/demo-hello-spring/base/secret.example.yaml"; do
+    [[ -f "${secret_file}" ]] || continue
+    apply_delivery_yaml "${kubeconfig_path}" < "${secret_file}"
+  done
+}
+
 emit_ghcr_pull_secret_yaml() {
   local username="$1"
   local token="$2"
@@ -3171,6 +3183,7 @@ cmd_configure_delivery() {
     create_namespace_if_missing "${KUBECONFIG_PATH}" kadm
     create_namespace_if_missing "${KUBECONFIG_PATH}" argocd
     create_namespace_if_missing "${KUBECONFIG_PATH}" apps
+    apply_demo_secret_examples_if_present "${KUBECONFIG_PATH}" "${app_configs_dir}"
     apply_argocd_rollout_health_customization "${KUBECONFIG_PATH}"
     if [[ "${ingress_mode}" == "gateway" ]]; then
       if [[ -n "${gateway_tls_secret_name}" ]]; then

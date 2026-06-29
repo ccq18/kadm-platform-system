@@ -293,6 +293,70 @@ STUB
   assert_file_contains "${calls_file}" "kadmctl configure-delivery home-prod --onecd-overlay ${release_dir}/k8s/overlays/prod --app-configs-dir ${app_dir} --ingress-mode traefik --apply"
 }
 
+test_server_deploy_can_configure_demo_app_dependencies() {
+  local tmp_home tmp_root tmp_bin calls_file system_dir release_dir app_dir
+  tmp_home="$(mktemp -d)"
+  tmp_root="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_root}/calls.log"
+  system_dir="${tmp_root}/bootstrap/workspace/kadm-platform-system"
+  release_dir="${system_dir}/console"
+  app_dir="${tmp_root}/bootstrap/workspace/kadm-app-configs"
+  mkdir -p "${tmp_root}/archives"
+
+  mkdir -p "${system_dir}/bin" "${release_dir}/k8s/overlays/prod"
+  cat > "${system_dir}/bin/kadmctl" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kadmctl %s\n' "\$*" >> "${calls_file}"
+STUB
+  chmod +x "${system_dir}/bin/kadmctl"
+  printf 'resources: []\n' > "${release_dir}/k8s/overlays/prod/kustomization.yaml"
+  make_repo_archive "${tmp_root}/archives/kadm-app-configs.tgz" "kadm-app-configs" "${calls_file}"
+  cat > "${tmp_bin}/curl" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+url=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    -o)
+      output="\${2:-}"
+      shift 2
+      ;;
+    *)
+      url="\$1"
+      shift
+      ;;
+  esac
+done
+case "\${url}" in
+  *"/commits/"*)
+    printf '{\n  "sha": "1111111111111111111111111111111111111111"\n}\n'
+    ;;
+  *"/kadm-app-configs/"*)
+    cp "${tmp_root}/archives/kadm-app-configs.tgz" "\${output}"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+STUB
+  chmod +x "${tmp_bin}/curl"
+
+  HOME="${tmp_home}" \
+    KADM_BOOTSTRAP_ROOT="${tmp_root}/bootstrap" \
+    KADM_GITHUB_TOKEN="test-token" \
+    KADM_DEMO_DB_SSH_TARGET="root@203.0.113.22" \
+    PATH="${tmp_bin}:${PATH}" \
+    bash "${SERVER_INSTALLER}" deploy \
+      --cluster home-prod \
+      --access-host root@203.0.113.11 \
+      --private-ip 10.0.0.11
+
+  assert_file_contains "${calls_file}" "kadmctl configure-demo-apps home-prod --app-configs-dir ${app_dir} --apply --db-ssh-target root@203.0.113.22"
+}
+
 test_server_deploy_rejects_invalid_ingress_mode() {
   local tmp_home tmp_root calls_file system_dir release_dir app_dir output status
   tmp_home="$(mktemp -d)"
@@ -420,6 +484,7 @@ test_server_prepare_downloads_workspace_and_imports_assets
 test_server_prepare_succeeds_with_complete_base_bundle_without_repo_archives
 test_server_deploy_calls_local_deploy_and_configure_delivery
 test_server_deploy_passes_traefik_ingress_mode_to_configure_delivery
+test_server_deploy_can_configure_demo_app_dependencies
 test_server_deploy_rejects_invalid_ingress_mode
 test_client_installer_fetches_profile_and_kubeconfig
 
