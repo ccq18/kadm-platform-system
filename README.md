@@ -123,6 +123,7 @@ kadmctl configure-delivery kadm-test --app-configs-dir /path/to/kadm-app-configs
 
 - K3s install script、binary 和 airgap image bundle
 - Helm archive
+- Crane archive
 - Gateway API experimental manifest
 - Argo CD install manifest
 - Argo Rollouts install manifest

@@ -44,6 +44,16 @@ assert_file_line_order() {
   (( first_line < second_line )) || fail "expected ${first} before ${second}"
 }
 
+detect_test_platform() {
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) echo "darwin-arm64" ;;
+    Darwin:x86_64) echo "darwin-amd64" ;;
+    Linux:x86_64) echo "linux-amd64" ;;
+    Linux:aarch64|Linux:arm64) echo "linux-arm64" ;;
+    *) fail "unsupported test platform" ;;
+  esac
+}
+
 run_in_temp_home() {
   local tmp_home="$1"
   shift
@@ -853,23 +863,23 @@ printf 'curl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
 cat >/dev/null
 printf '{"token":"generated-argocd-token"}'
 STUB
-  cat > "${tmp_bin}/docker" <<'STUB'
+  cat > "${tmp_bin}/crane" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'docker %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
-if [[ "$*" == "login ghcr.io -u ccq18 --password-stdin" ]]; then
+printf 'crane %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == "auth login ghcr.io -u ccq18 --password-stdin" ]]; then
   cat >/dev/null
 fi
 exit 0
 STUB
-  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl" "${tmp_bin}/docker"
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl" "${tmp_bin}/crane"
 
   local output
   output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" configure-delivery home-prod --ingress-mode traefik --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
 
   assert_contains "${output}" "delivery configuration applied"
-  assert_file_contains "${calls_file}" "docker login ghcr.io -u ccq18 --password-stdin"
-  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello:test-tag"
+  assert_file_contains "${calls_file}" "crane auth login ghcr.io -u ccq18 --password-stdin"
+  assert_file_contains "${calls_file}" "crane manifest ghcr.io/ccq18/demo-hello:test-tag"
   assert_file_contains "${stdin_file}" "resource.customizations.health.argoproj.io_Rollout"
   assert_file_contains "${stdin_file}" "resource.customizations.health.gateway.networking.k8s.io_HTTPRoute"
   assert_file_contains "${stdin_file}" "kind: Ingress"
@@ -926,11 +936,11 @@ images:
   newName: ghcr.io/ccq18/demo-hello
   newTag: missing-tag
 YAML
-  cat > "${tmp_bin}/docker" <<'STUB'
+  cat > "${tmp_bin}/crane" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'docker %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
-if [[ "$*" == "login ghcr.io -u ccq18 --password-stdin" ]]; then
+printf 'crane %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == "auth login ghcr.io -u ccq18 --password-stdin" ]]; then
   cat >/dev/null
   exit 0
 fi
@@ -942,7 +952,7 @@ set -euo pipefail
 printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
 exit 0
 STUB
-  chmod +x "${tmp_bin}/docker" "${tmp_bin}/kubectl"
+  chmod +x "${tmp_bin}/crane" "${tmp_bin}/kubectl"
 
   local output status
   set +e
@@ -953,7 +963,7 @@ STUB
   [[ "${status}" -ne 0 ]] || fail "configure-delivery succeeded with invalid GHCR credentials"
   assert_contains "${output}" "failed to verify GHCR image pull access"
   assert_contains "${output}" "ghcr.io/ccq18/demo-hello:missing-tag"
-  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello:missing-tag"
+  assert_file_contains "${calls_file}" "crane manifest ghcr.io/ccq18/demo-hello:missing-tag"
 }
 
 test_configure_delivery_fails_fast_on_invalid_app_registry() {
@@ -993,7 +1003,7 @@ PROFILE
   }
 ]
 JSON
-  for tool in ssh kubectl curl docker; do
+  for tool in ssh kubectl curl crane; do
     cat > "${tmp_bin}/${tool}" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1278,11 +1288,11 @@ printf 'curl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
 cat >/dev/null
 printf '{"token":"generated-argocd-token"}'
 STUB
-  cat > "${tmp_bin}/docker" <<'STUB'
+  cat > "${tmp_bin}/crane" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'docker %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
-if [[ "$*" == "login ghcr.io -u ccq18 --password-stdin" ]]; then
+printf 'crane %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == "auth login ghcr.io -u ccq18 --password-stdin" ]]; then
   cat >/dev/null
 fi
 exit 0
@@ -1318,7 +1328,7 @@ cat "${config}" >> "${ONECDCTL_TEST_STDIN}"
 printf 'test-cert\n' > "${out}"
 printf 'test-key\n' > "${keyout}"
 STUB
-  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl" "${tmp_bin}/docker"
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl" "${tmp_bin}/crane"
   chmod +x "${tmp_bin}/openssl"
 
   local output
@@ -1330,8 +1340,8 @@ STUB
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd get secret argocd-initial-admin-secret"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18081:80"
   assert_file_contains "${calls_file}" "curl -fksSL --connect-timeout 10 --max-time 60"
-  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello:hello-test-tag"
-  assert_file_contains "${calls_file}" "docker manifest inspect ghcr.io/ccq18/demo-hello-spring:spring-test-tag"
+  assert_file_contains "${calls_file}" "crane manifest ghcr.io/ccq18/demo-hello:hello-test-tag"
+  assert_file_contains "${calls_file}" "crane manifest ghcr.io/ccq18/demo-hello-spring:spring-test-tag"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace kadm"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace argocd"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s create namespace apps"
@@ -1588,22 +1598,18 @@ test_install_tools_dry_run_is_script_managed() {
 
   assert_contains "${output}" "DRY RUN: local tools will not be installed"
   assert_contains "${output}" "tool: helm"
+  assert_contains "${output}" "tool: crane"
   assert_contains "${output}" "${tmp_home}/.kadm/bin"
   [[ ! -e "${tmp_home}/.kadm/bin/helm" ]] || fail "dry-run installed helm"
+  [[ ! -e "${tmp_home}/.kadm/bin/crane" ]] || fail "dry-run installed crane"
 }
 
 test_install_tools_uses_cached_helm_archive() {
-  local tmp_home tmp_bin calls_file platform archive_root archive
+  local tmp_home tmp_bin calls_file platform archive_root archive crane_archive
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
-  case "$(uname -s):$(uname -m)" in
-    Darwin:arm64) platform="darwin-arm64" ;;
-    Darwin:x86_64) platform="darwin-amd64" ;;
-    Linux:x86_64) platform="linux-amd64" ;;
-    Linux:aarch64|Linux:arm64) platform="linux-arm64" ;;
-    *) fail "unsupported test platform" ;;
-  esac
+  platform="$(detect_test_platform)"
   archive_root="${tmp_home}/archive-root"
   archive="${tmp_home}/.kadm/cache/tools/helm-v3.15.4-${platform}.tar.gz"
   mkdir -p "${archive_root}/${platform}" "$(dirname "${archive}")"
@@ -1613,6 +1619,13 @@ printf 'cached helm\n'
 STUB
   chmod +x "${archive_root}/${platform}/helm"
   tar -czf "${archive}" -C "${archive_root}" "${platform}"
+  cat > "${archive_root}/crane" <<'STUB'
+#!/usr/bin/env bash
+printf 'cached crane\n'
+STUB
+  chmod +x "${archive_root}/crane"
+  crane_archive="${tmp_home}/.kadm/cache/tools/crane-v0.21.7-${platform}.tar.gz"
+  tar -czf "${crane_archive}" -C "${archive_root}" crane
 
   cat > "${tmp_bin}/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -1626,8 +1639,45 @@ STUB
   output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" install-tools --apply)"
 
   assert_contains "${output}" "Using cached helm archive: ${archive}"
+  assert_contains "${output}" "Using cached crane archive: ${crane_archive}"
   [[ -x "${tmp_home}/.kadm/bin/helm" ]] || fail "cached helm was not installed"
+  [[ -x "${tmp_home}/.kadm/bin/crane" ]] || fail "cached crane was not installed"
   [[ ! -f "${calls_file}" ]] || fail "install-tools called curl despite cached Helm archive"
+}
+
+test_install_tools_requires_confirmation_before_replacing_managed_tools() {
+  local tmp_home tmp_bin platform archive_root archive crane_archive output status
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  platform="$(detect_test_platform)"
+  archive_root="${tmp_home}/archive-root"
+  archive="${tmp_home}/.kadm/cache/tools/helm-v3.15.4-${platform}.tar.gz"
+  crane_archive="${tmp_home}/.kadm/cache/tools/crane-v0.21.7-${platform}.tar.gz"
+  mkdir -p "${archive_root}/${platform}" "${tmp_home}/.kadm/bin" "$(dirname "${archive}")"
+  cat > "${archive_root}/${platform}/helm" <<'STUB'
+#!/usr/bin/env bash
+printf 'cached helm\n'
+STUB
+  chmod +x "${archive_root}/${platform}/helm"
+  tar -czf "${archive}" -C "${archive_root}" "${platform}"
+  cat > "${archive_root}/crane" <<'STUB'
+#!/usr/bin/env bash
+printf 'cached crane\n'
+STUB
+  chmod +x "${archive_root}/crane"
+  tar -czf "${crane_archive}" -C "${archive_root}" crane
+  printf 'old helm\n' > "${tmp_home}/.kadm/bin/helm"
+  printf 'old crane\n' > "${tmp_home}/.kadm/bin/crane"
+  chmod +x "${tmp_home}/.kadm/bin/helm" "${tmp_home}/.kadm/bin/crane"
+
+  set +e
+  output="$(PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" install-tools --apply 2>&1)"
+  status="$?"
+  set -e
+
+  [[ "${status}" -ne 0 ]] || fail "install-tools replaced managed tools without confirmation"
+  assert_contains "${output}" "managed tools already exist"
+  assert_contains "${output}" "KADM_CONFIRM_TOOL_UNINSTALL=yes"
 }
 
 test_prepare_assets_dry_run_prints_pinned_assets() {
@@ -1641,6 +1691,7 @@ test_prepare_assets_dry_run_prints_pinned_assets() {
   assert_contains "${output}" "Argo CD manifest: https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.4/manifests/install.yaml"
   assert_contains "${output}" "Argo Rollouts manifest: https://github.com/argoproj/argo-rollouts/releases/download/v1.9.0/install.yaml"
   assert_contains "${output}" "Cilium chart: https://helm.cilium.io/cilium-1.19.5.tgz"
+  assert_contains "${output}" "Crane archive: https://github.com/google/go-containerregistry/releases/download/v0.21.7/go-containerregistry_"
   [[ ! -e "${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz" ]] || fail "dry-run downloaded chart"
 }
 
@@ -1679,19 +1730,22 @@ STUB
   assert_file_contains "${calls_file}" "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.4/manifests/install.yaml"
   assert_file_contains "${calls_file}" "https://github.com/argoproj/argo-rollouts/releases/download/v1.9.0/install.yaml"
   assert_file_contains "${calls_file}" "https://helm.cilium.io/cilium-1.19.5.tgz"
+  assert_file_contains "${calls_file}" "https://github.com/google/go-containerregistry/releases/download/v0.21.7/go-containerregistry_"
   [[ -s "${tmp_home}/.kadm/cache/manifests/https___github.com_kubernetes-sigs_gateway-api_releases_download_v1.5.1_experimental-install.yaml.yaml" ]] || fail "missing Gateway API cache"
   [[ -s "${tmp_home}/.kadm/cache/charts/cilium-1.19.5.tgz" ]] || fail "missing Cilium chart cache"
+  [[ -s "${tmp_home}/.kadm/cache/tools/crane-v0.21.7-$(detect_test_platform).tar.gz" ]] || fail "missing Crane cache"
 }
 
 test_prepare_assets_reuses_compatible_legacy_manifest_cache() {
-  local tmp_home tmp_bin calls_file cache_dir chart_dir k3s_dir
+  local tmp_home tmp_bin calls_file cache_dir chart_dir k3s_dir tools_dir
   tmp_home="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   cache_dir="${tmp_home}/.kadm/cache/manifests"
   chart_dir="${tmp_home}/.kadm/cache/charts"
   k3s_dir="${tmp_home}/.kadm/cache/k3s"
-  mkdir -p "${cache_dir}" "${chart_dir}" "${k3s_dir}"
+  tools_dir="${tmp_home}/.kadm/cache/tools"
+  mkdir -p "${cache_dir}" "${chart_dir}" "${k3s_dir}" "${tools_dir}"
   cat > "${cache_dir}/https___raw.githubusercontent.com_argoproj_argo-cd_stable_manifests_install.yaml.yaml" <<'YAML'
 apiVersion: apps/v1
 kind: Deployment
@@ -1720,6 +1774,8 @@ YAML
   printf 'install\n' > "${k3s_dir}/install-v1.36.2+k3s1.sh"
   printf 'binary\n' > "${k3s_dir}/k3s-v1.36.2+k3s1"
   printf 'airgap\n' > "${k3s_dir}/k3s-airgap-images-v1.36.2+k3s1-amd64.tar.zst"
+  printf 'helm\n' > "${tools_dir}/helm-v3.15.4-$(detect_test_platform).tar.gz"
+  printf 'crane\n' > "${tools_dir}/crane-v0.21.7-$(detect_test_platform).tar.gz"
 
   cat > "${tmp_bin}/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -1803,6 +1859,7 @@ test_import_assets_restores_complete_bundle_metadata() {
   printf 'rollouts\n' > "${src_dir}/bundle/cache/manifests/https___github.com_argoproj_argo-rollouts_releases_download_v1.9.0_install.yaml.yaml"
   printf 'chart\n' > "${src_dir}/bundle/cache/charts/cilium-1.19.5.tgz"
   printf 'helm\n' > "${src_dir}/bundle/cache/tools/helm-v3.15.4-linux-amd64.tar.gz"
+  printf 'crane\n' > "${src_dir}/bundle/cache/tools/crane-v0.21.7-linux-amd64.tar.gz"
   printf 'image archive\n' > "${src_dir}/bundle/cache/images/runtime-images.tar.zst"
   printf 'quay.io/argoproj/argocd:v3.4.4\n' > "${src_dir}/bundle/cache/images/runtime-images.txt"
   printf 'checksum\n' > "${src_dir}/bundle/cache/images/runtime-images.sha256"
@@ -1821,6 +1878,7 @@ ENV
   assert_contains "${output}" "offline bundle mode: complete"
   [[ -s "${dst_home}/.kadm/cache/metadata/offline-bundle.env" ]] || fail "import missing bundle metadata"
   [[ -s "${dst_home}/.kadm/cache/tools/helm-v3.15.4-linux-amd64.tar.gz" ]] || fail "import missing cached Helm archive"
+  [[ -s "${dst_home}/.kadm/cache/tools/crane-v0.21.7-linux-amd64.tar.gz" ]] || fail "import missing cached Crane archive"
   [[ -s "${dst_home}/.kadm/cache/images/runtime-images.tar.zst" ]] || fail "import missing runtime images archive"
   [[ ! -e "${dst_home}/.kadm/cache/repos" ]] || fail "import left stale repo cache for base-only bundle"
 }
@@ -2021,11 +2079,11 @@ PROFILE
 }
 
 test_configure_demo_apps_dry_run_describes_secret_and_db_setup() {
-  local tmp_home tmp_apps
+  local tmp_home apps_dir
   tmp_home="$(mktemp -d)"
-  tmp_apps="$(mktemp -d)"
+  apps_dir="$(mktemp -d)"
   mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
-  mkdir -p "${tmp_apps}/apps/demo-hello/base" "${tmp_apps}/apps/demo-hello-spring/base"
+  mkdir -p "${apps_dir}/apps/demo-hello/base" "${apps_dir}/apps/demo-hello-spring/base"
   cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
@@ -2035,7 +2093,7 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/kadm/home-prod.yaml"
-  cat > "${tmp_apps}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2047,7 +2105,7 @@ stringData:
   DB_PASSWORD: hello_password_change_me
   DB_NAME: hello_app
 YAML
-  cat > "${tmp_apps}/apps/demo-hello/base/rollout.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/rollout.yaml" <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 spec:
@@ -2059,7 +2117,7 @@ spec:
             - name: DB_HOST
               value: "10.120.0.6"
 YAML
-  cat > "${tmp_apps}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2071,7 +2129,7 @@ stringData:
   DB_PASSWORD: hellospring_password_change_me
   DB_NAME: hellospring_app
 YAML
-  cat > "${tmp_apps}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 spec:
@@ -2085,25 +2143,25 @@ spec:
 YAML
 
   local output
-  output="$(HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${tmp_apps}" --db-ssh-target root@203.0.113.22 --dry-run)"
+  output="$(HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${apps_dir}" --db-ssh-target root@203.0.113.22 --dry-run)"
 
   assert_contains "${output}" "DRY RUN: no demo app dependencies will be configured"
   assert_contains "${output}" "cluster: home-prod"
-  assert_contains "${output}" "app configs: ${tmp_apps}"
+  assert_contains "${output}" "app configs: ${apps_dir}"
   assert_contains "${output}" "db ssh target: root@203.0.113.22"
   assert_contains "${output}" "creates: apps/hello-db"
   assert_contains "${output}" "creates: apps/hellospring-db"
 }
 
 test_configure_demo_apps_apply_syncs_secrets_and_mysql_users() {
-  local tmp_home tmp_apps tmp_bin calls_file stdin_file
+  local tmp_home apps_dir tmp_bin calls_file stdin_file
   tmp_home="$(mktemp -d)"
-  tmp_apps="$(mktemp -d)"
+  apps_dir="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   stdin_file="${tmp_home}/stdin.log"
   mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
-  mkdir -p "${tmp_apps}/apps/demo-hello/base" "${tmp_apps}/apps/demo-hello-spring/base"
+  mkdir -p "${apps_dir}/apps/demo-hello/base" "${apps_dir}/apps/demo-hello-spring/base"
   cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
@@ -2113,7 +2171,7 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/kadm/home-prod.yaml"
-  cat > "${tmp_apps}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2125,7 +2183,7 @@ stringData:
   DB_PASSWORD: hello_password_change_me
   DB_NAME: hello_app
 YAML
-  cat > "${tmp_apps}/apps/demo-hello/base/rollout.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/rollout.yaml" <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 spec:
@@ -2137,7 +2195,7 @@ spec:
             - name: DB_HOST
               value: "10.120.0.6"
 YAML
-  cat > "${tmp_apps}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2149,7 +2207,7 @@ stringData:
   DB_PASSWORD: hellospring_password_change_me
   DB_NAME: hellospring_app
 YAML
-  cat > "${tmp_apps}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 spec:
@@ -2206,7 +2264,7 @@ STUB
   chmod +x "${tmp_bin}/ssh" "${tmp_bin}/ssh-keyscan" "${tmp_bin}/kubectl"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${tmp_apps}" --db-ssh-target root@203.0.113.22 --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${apps_dir}" --db-ssh-target root@203.0.113.22 --apply)"
 
   assert_contains "${output}" "demo app dependencies configured"
   assert_file_contains "${calls_file}" "ssh -N -L 16445:127.0.0.1:6443 -o ExitOnForwardFailure=yes root@203.0.113.11"
@@ -2225,14 +2283,14 @@ STUB
 }
 
 test_configure_demo_apps_apply_waits_for_rollout_health_when_rollouts_exist() {
-  local tmp_home tmp_apps tmp_bin calls_file stdin_file
+  local tmp_home apps_dir tmp_bin calls_file stdin_file
   tmp_home="$(mktemp -d)"
-  tmp_apps="$(mktemp -d)"
+  apps_dir="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
   calls_file="${tmp_home}/calls.log"
   stdin_file="${tmp_home}/stdin.log"
   mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm"
-  mkdir -p "${tmp_apps}/apps/demo-hello/base" "${tmp_apps}/apps/demo-hello-spring/base"
+  mkdir -p "${apps_dir}/apps/demo-hello/base" "${apps_dir}/apps/demo-hello-spring/base"
   cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
 CLUSTER_NAME=home-prod
 MASTER_SSH=root@203.0.113.11
@@ -2242,7 +2300,7 @@ API_LOCAL_PORT=16445
 CONSOLE_LOCAL_PORT=18081
 PROFILE
   touch "${tmp_home}/.kube/kadm/home-prod.yaml"
-  cat > "${tmp_apps}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/secret.example.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2254,7 +2312,7 @@ stringData:
   DB_PASSWORD: hello_password_change_me
   DB_NAME: hello_app
 YAML
-  cat > "${tmp_apps}/apps/demo-hello/base/rollout.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello/base/rollout.yaml" <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 spec:
@@ -2266,7 +2324,7 @@ spec:
             - name: DB_HOST
               value: "10.120.0.6"
 YAML
-  cat > "${tmp_apps}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/secret.example.yaml" <<'YAML'
 apiVersion: v1
 kind: Secret
 metadata:
@@ -2278,7 +2336,7 @@ stringData:
   DB_PASSWORD: hellospring_password_change_me
   DB_NAME: hellospring_app
 YAML
-  cat > "${tmp_apps}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
+  cat > "${apps_dir}/apps/demo-hello-spring/base/rollout.yaml" <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 spec:
@@ -2340,7 +2398,7 @@ STUB
   chmod +x "${tmp_bin}/ssh" "${tmp_bin}/ssh-keyscan" "${tmp_bin}/kubectl"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${tmp_apps}" --db-ssh-target root@203.0.113.22 --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" configure-demo-apps home-prod --app-configs-dir "${apps_dir}" --db-ssh-target root@203.0.113.22 --apply)"
 
   assert_contains "${output}" "rollout/hello healthy: 2/2"
   assert_contains "${output}" "rollout/hellospring healthy: 1/1"

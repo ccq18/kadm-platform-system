@@ -30,7 +30,9 @@ WORKSPACE_PARENT="$(cd "${KADM_SYSTEM_ROOT}/.." && pwd)"
 DEFAULT_ONECD_OVERLAY="${KADM_SYSTEM_ROOT}/console/k8s/overlays/prod"
 DEFAULT_APP_CONFIGS_DIR="${WORKSPACE_PARENT}/kadm-app-configs"
 DEFAULT_HELM_VERSION="v3.15.4"
+DEFAULT_CRANE_VERSION="v0.21.7"
 HELM_BIN=""
+CRANE_BIN=""
 
 usage() {
   cat <<'USAGE'
@@ -228,6 +230,31 @@ helm_archive_cache_path() {
   echo "$(tool_cache_dir)/helm-${helm_version}-${platform}.tar.gz"
 }
 
+crane_archive_platform() {
+  local platform="$1"
+  case "${platform}" in
+    darwin-arm64) echo "Darwin_arm64" ;;
+    darwin-amd64) echo "Darwin_x86_64" ;;
+    linux-amd64) echo "Linux_x86_64" ;;
+    linux-arm64) echo "Linux_arm64" ;;
+    *) die "unsupported crane platform: ${platform}" ;;
+  esac
+}
+
+crane_archive_cache_path() {
+  local crane_version="$1"
+  local platform="$2"
+  echo "$(tool_cache_dir)/crane-${crane_version}-${platform}.tar.gz"
+}
+
+crane_download_url() {
+  local crane_version="$1"
+  local platform="$2"
+  local archive_platform
+  archive_platform="$(crane_archive_platform "${platform}")"
+  echo "https://github.com/google/go-containerregistry/releases/download/${crane_version}/go-containerregistry_${archive_platform}.tar.gz"
+}
+
 image_cache_dir() {
   echo "$(cache_dir)/images"
 }
@@ -308,11 +335,16 @@ detect_platform() {
 cmd_install_tools() {
   local apply=0
   local helm_version="${DEFAULT_HELM_VERSION}"
+  local crane_version="${DEFAULT_CRANE_VERSION}"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --helm-version)
         helm_version="${2:-}"
+        shift 2
+        ;;
+      --crane-version)
+        crane_version="${2:-}"
         shift 2
         ;;
       --apply)
@@ -340,12 +372,15 @@ cmd_install_tools() {
   if [[ "${apply}" -ne 1 ]]; then
     info "DRY RUN: local tools will not be installed"
     info "tool: helm ${helm_version}"
+    info "tool: crane ${crane_version}"
     info "platform: ${platform}"
     info "target dir: ${dir}"
     return 0
   fi
 
+  prepare_managed_tool_install "${dir}" helm crane
   install_helm "${helm_version}" "${platform}" "${dir}"
+  install_crane "${crane_version}" "${platform}" "${dir}"
 }
 
 cmd_reset_node() {
@@ -550,6 +585,7 @@ cmd_prepare_assets() {
   validate_optional_machine_value "cilium version" "${cilium_version}"
 
   local gateway_path argocd_path rollouts_path cilium_chart_path_value k3s_install_path k3s_binary_path_value k3s_airgap_path
+  local platform helm_archive_path_value crane_archive_path_value
   gateway_path="$(manifest_cache_path "${gateway_api_url}")"
   argocd_path="$(manifest_cache_path "${argocd_url}")"
   rollouts_path="$(manifest_cache_path "${rollouts_url}")"
@@ -557,6 +593,9 @@ cmd_prepare_assets() {
   k3s_install_path="$(k3s_install_script_path "${k3s_version}")"
   k3s_binary_path_value="$(k3s_binary_path "${k3s_version}")"
   k3s_airgap_path="$(k3s_airgap_images_path "${k3s_version}")"
+  platform="$(detect_platform)"
+  helm_archive_path_value="$(helm_archive_cache_path "${DEFAULT_HELM_VERSION}" "${platform}")"
+  crane_archive_path_value="$(crane_archive_cache_path "${DEFAULT_CRANE_VERSION}" "${platform}")"
 
   if [[ "${apply}" -ne 1 ]]; then
     info "DRY RUN: installer assets will not be downloaded"
@@ -567,6 +606,8 @@ cmd_prepare_assets() {
     info "Argo CD manifest: ${argocd_url}"
     info "Argo Rollouts manifest: ${rollouts_url}"
     info "Cilium chart: ${cilium_chart_url}"
+    info "Helm archive: https://get.helm.sh/helm-${DEFAULT_HELM_VERSION}-${platform}.tar.gz"
+    info "Crane archive: $(crane_download_url "${DEFAULT_CRANE_VERSION}" "${platform}")"
     info "cache: ${k3s_install_path}"
     info "cache: ${k3s_binary_path_value}"
     info "cache: ${k3s_airgap_path}"
@@ -574,6 +615,8 @@ cmd_prepare_assets() {
     info "cache: ${argocd_path}"
     info "cache: ${rollouts_path}"
     info "cache: ${cilium_chart_path_value}"
+    info "cache: ${helm_archive_path_value}"
+    info "cache: ${crane_archive_path_value}"
     return 0
   fi
 
@@ -584,6 +627,8 @@ cmd_prepare_assets() {
   prepare_manifest_asset_with_legacy "${argocd_url}" "${refresh}" "Argo CD manifest" "quay.io/argoproj/argocd:${DEFAULT_ARGOCD_VERSION}" "${LEGACY_ARGOCD_URL}"
   prepare_manifest_asset_with_legacy "${rollouts_url}" "${refresh}" "Argo Rollouts manifest" "quay.io/argoproj/argo-rollouts:${DEFAULT_ROLLOUTS_VERSION}" "${LEGACY_ROLLOUTS_URL}"
   download_file_to_cache "${cilium_chart_url}" "${cilium_chart_path_value}" "${refresh}" "Cilium chart"
+  download_file_to_cache "https://get.helm.sh/helm-${DEFAULT_HELM_VERSION}-${platform}.tar.gz" "${helm_archive_path_value}" "${refresh}" "Helm archive"
+  download_file_to_cache "$(crane_download_url "${DEFAULT_CRANE_VERSION}" "${platform}")" "${crane_archive_path_value}" "${refresh}" "Crane archive"
 
   info "installer assets are ready"
   info "next: kadmctl bootstrap <ssh-target> --apply"
@@ -640,6 +685,7 @@ cmd_import_assets() {
   require_default_assets
   if offline_complete_bundle_active; then
     [[ -d "$(tool_cache_dir)" ]] || die "complete offline bundle missing cache/tools"
+    [[ -s "$(crane_archive_cache_path "${DEFAULT_CRANE_VERSION}" "linux-amd64")" ]] || die "complete offline bundle missing $(crane_archive_cache_path "${DEFAULT_CRANE_VERSION}" "linux-amd64")"
     [[ -s "$(runtime_images_archive_path)" ]] || die "complete offline bundle missing $(runtime_images_archive_path)"
     [[ -s "$(runtime_images_list_path)" ]] || die "complete offline bundle missing $(runtime_images_list_path)"
     [[ -s "$(runtime_images_checksum_path)" ]] || die "complete offline bundle missing $(runtime_images_checksum_path)"
@@ -692,12 +738,87 @@ install_helm() {
   HELM_BIN="${target}"
 }
 
-ensure_helm() {
-  if command -v helm >/dev/null 2>&1; then
-    HELM_BIN="$(command -v helm)"
+install_crane() {
+  local crane_version="$1"
+  local platform="$2"
+  local dir="$3"
+  local target="${dir}/crane"
+
+  require_command tar
+  require_command mktemp
+
+  if [[ -x "${target}" ]]; then
+    CRANE_BIN="${target}"
+    info "crane already installed: ${target}"
     return 0
   fi
 
+  local tmp
+  tmp="$(mktemp -d)"
+  mkdir -p "${dir}"
+
+  local archive cached_archive url
+  archive="${tmp}/crane.tgz"
+  cached_archive="$(crane_archive_cache_path "${crane_version}" "${platform}")"
+  url="$(crane_download_url "${crane_version}" "${platform}")"
+  if [[ -s "${cached_archive}" ]]; then
+    info "Using cached crane archive: ${cached_archive}"
+    cp "${cached_archive}" "${archive}"
+  else
+    if offline_complete_bundle_active; then
+      rm -rf "${tmp}"
+      die "complete offline bundle missing cached crane archive: ${cached_archive}"
+    fi
+    require_command curl
+    info "Installing crane ${crane_version} for ${platform} into ${dir}"
+    curl -fsSL "${url}" -o "${archive}"
+  fi
+  tar -xzf "${archive}" -C "${tmp}"
+  [[ -x "${tmp}/crane" ]] || die "crane archive does not contain a crane binary: ${url}"
+  cp "${tmp}/crane" "${target}"
+  chmod 700 "${target}"
+  rm -rf "${tmp}"
+  CRANE_BIN="${target}"
+}
+
+prepare_managed_tool_install() {
+  local dir="$1"
+  shift
+  local targets=()
+  local tool target answer
+
+  mkdir -p "${dir}"
+  for tool in "$@"; do
+    target="${dir}/${tool}"
+    if [[ -e "${target}" ]]; then
+      targets+=("${target}")
+    fi
+  done
+
+  [[ "${#targets[@]}" -gt 0 ]] || return 0
+
+  if [[ "${KADM_CONFIRM_TOOL_UNINSTALL:-}" == "yes" ]]; then
+    answer="yes"
+  elif [[ -t 0 ]]; then
+    info "Managed tools already exist and will be replaced:"
+    printf '  %s\n' "${targets[@]}"
+    printf 'Remove and reinstall these tools? [y/N] '
+    read -r answer
+  else
+    die "managed tools already exist: ${targets[*]}. Remove them manually or rerun with KADM_CONFIRM_TOOL_UNINSTALL=yes"
+  fi
+
+  case "${answer}" in
+    y|Y|yes|YES)
+      rm -f "${targets[@]}"
+      ;;
+    *)
+      die "aborted tool reinstall"
+      ;;
+  esac
+}
+
+ensure_helm() {
   local bundled
   bundled="$(tool_dir)/helm"
   if [[ -x "${bundled}" ]]; then
@@ -705,7 +826,28 @@ ensure_helm() {
     return 0
   fi
 
+  if command -v helm >/dev/null 2>&1; then
+    HELM_BIN="$(command -v helm)"
+    return 0
+  fi
+
   install_helm "${DEFAULT_HELM_VERSION}" "$(detect_platform)" "$(tool_dir)"
+}
+
+ensure_crane() {
+  local bundled
+  bundled="$(tool_dir)/crane"
+  if [[ -x "${bundled}" ]]; then
+    CRANE_BIN="${bundled}"
+    return 0
+  fi
+
+  if command -v crane >/dev/null 2>&1; then
+    CRANE_BIN="$(command -v crane)"
+    return 0
+  fi
+
+  install_crane "${DEFAULT_CRANE_VERSION}" "$(detect_platform)" "$(tool_dir)"
 }
 
 is_remote_url() {
@@ -2323,26 +2465,32 @@ verify_ghcr_image_pull_access() {
   local apps_file="${app_configs_dir}/apps/apps.json"
   [[ -n "${ONECD_GHCR_USERNAME:-}" ]] || return 0
 
-  require_command docker
-  if ! printf '%s' "${ONECD_GHCR_TOKEN}" | docker login ghcr.io -u "${ONECD_GHCR_USERNAME}" --password-stdin >/dev/null 2>&1; then
-    die "failed to verify GHCR image pull access: docker login ghcr.io failed for ${ONECD_GHCR_USERNAME}. Provide KADM_GHCR_USERNAME/KADM_GHCR_TOKEN with package read access."
+  ensure_crane
+  local auth_dir
+  auth_dir="$(mktemp -d)"
+  if ! printf '%s' "${ONECD_GHCR_TOKEN}" | DOCKER_CONFIG="${auth_dir}" "${CRANE_BIN}" auth login ghcr.io -u "${ONECD_GHCR_USERNAME}" --password-stdin >/dev/null 2>&1; then
+    rm -rf "${auth_dir}"
+    die "failed to verify GHCR image pull access: crane auth login ghcr.io failed for ${ONECD_GHCR_USERNAME}. Provide KADM_GHCR_USERNAME/KADM_GHCR_TOKEN with package read access."
   fi
 
   local image
   local image_list
   image_list="$(mktemp)"
   if ! list_registry_images "${apps_file}" "${app_configs_dir}" > "${image_list}"; then
+    rm -rf "${auth_dir}"
     rm -f "${image_list}"
     return 1
   fi
 
   while IFS= read -r image; do
     [[ -n "${image}" ]] || continue
-    if ! docker manifest inspect "${image}" >/dev/null 2>&1; then
+    if ! DOCKER_CONFIG="${auth_dir}" "${CRANE_BIN}" manifest "${image}" >/dev/null 2>&1; then
+      rm -rf "${auth_dir}"
       rm -f "${image_list}"
       die "failed to verify GHCR image pull access for ${image}. Check that the tag exists and KADM_GHCR_TOKEN has package read access."
     fi
   done < "${image_list}"
+  rm -rf "${auth_dir}"
   rm -f "${image_list}"
 }
 
