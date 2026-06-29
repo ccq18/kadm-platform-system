@@ -1493,7 +1493,31 @@ start_service_port_forward() {
   local service="$3"
   local local_port="$4"
   local remote_port="$5"
+
+  if start_service_port_forward_once "${kubeconfig_path}" "${namespace}" "${service}" "${local_port}" "${remote_port}"; then
+    printf '%s\n' "${PORT_FORWARD_PID}"
+    return 0
+  fi
+
+  if [[ -n "${PORT_FORWARD_ERROR_LOG:-}" ]]; then
+    printf '%s\n' "${PORT_FORWARD_ERROR_LOG}" >&2
+  fi
+  if [[ "${PORT_FORWARD_FAILURE_KIND:-}" == "not_ready" ]]; then
+    die "port-forward did not become ready for ${namespace}/${service}"
+  fi
+  die "port-forward failed to start for ${namespace}/${service}"
+}
+
+start_service_port_forward_once() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local service="$3"
+  local local_port="$4"
+  local remote_port="$5"
   local log_file
+  PORT_FORWARD_ERROR_LOG=""
+  PORT_FORWARD_FAILURE_KIND=""
+  PORT_FORWARD_PID=""
   log_file="$(mktemp)"
 
   kubectl_for "${kubeconfig_path}" -n "${namespace}" port-forward "svc/${service}" "${local_port}:${remote_port}" >"${log_file}" 2>&1 &
@@ -1502,22 +1526,62 @@ start_service_port_forward() {
   local i
   for ((i = 1; i <= 30; i++)); do
     if ! kill -0 "${port_forward_pid}" >/dev/null 2>&1; then
-      cat "${log_file}" >&2 || true
+      PORT_FORWARD_ERROR_LOG="$(cat "${log_file}" 2>/dev/null || true)"
+      PORT_FORWARD_FAILURE_KIND="start_failed"
       rm -f "${log_file}"
-      die "port-forward failed to start for ${namespace}/${service}"
+      return 1
     fi
     if grep -Fq "Forwarding from" "${log_file}"; then
+      PORT_FORWARD_PID="${port_forward_pid}"
       rm -f "${log_file}"
-      echo "${port_forward_pid}"
       return 0
     fi
     sleep 1
   done
 
-  cat "${log_file}" >&2 || true
+  PORT_FORWARD_ERROR_LOG="$(cat "${log_file}" 2>/dev/null || true)"
+  PORT_FORWARD_FAILURE_KIND="not_ready"
   rm -f "${log_file}"
   stop_pid "${port_forward_pid}"
-  die "port-forward did not become ready for ${namespace}/${service}"
+  return 1
+}
+
+start_service_port_forward_with_local_port_fallback() {
+  local kubeconfig_path="$1"
+  local namespace="$2"
+  local service="$3"
+  local local_port="$4"
+  local remote_port="$5"
+  local max_attempts="${6:-10}"
+  local attempt_port="${local_port}"
+  local attempt next_port
+
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if start_service_port_forward_once "${kubeconfig_path}" "${namespace}" "${service}" "${attempt_port}" "${remote_port}"; then
+      printf '%s\t%s\n' "${PORT_FORWARD_PID}" "${attempt_port}"
+      return 0
+    fi
+
+    if [[ "${PORT_FORWARD_FAILURE_KIND:-}" == "start_failed" && "${PORT_FORWARD_ERROR_LOG:-}" == *"address already in use"* && "${attempt}" -lt "${max_attempts}" ]]; then
+      next_port="$((attempt_port + 1))"
+      printf '%s\n' "local port ${attempt_port} already in use for ${namespace}/${service}; retrying with ${next_port}" >&2
+      attempt_port="${next_port}"
+      continue
+    fi
+
+    if [[ -n "${PORT_FORWARD_ERROR_LOG:-}" ]]; then
+      printf '%s\n' "${PORT_FORWARD_ERROR_LOG}" >&2
+    fi
+    if [[ "${PORT_FORWARD_FAILURE_KIND:-}" == "not_ready" ]]; then
+      die "port-forward did not become ready for ${namespace}/${service}"
+    fi
+    die "port-forward failed to start for ${namespace}/${service}"
+  done
+
+  if [[ -n "${PORT_FORWARD_ERROR_LOG:-}" ]]; then
+    printf '%s\n' "${PORT_FORWARD_ERROR_LOG}" >&2
+  fi
+  die "no available local port found for ${namespace}/${service} starting from ${local_port}"
 }
 
 base64_decode_value() {
@@ -3148,20 +3212,23 @@ cmd_configure_delivery() {
   local argocd_token="${ONECD_ARGOCD_TOKEN:-}"
   if [[ -z "${argocd_token}" ]]; then
     info "Generating Argo CD session token for KADM release console"
-    local argocd_password argocd_port_forward_pid token_status
+    local argocd_password argocd_port_forward_pid argocd_port_forward_result argocd_effective_local_port token_status
     argocd_password=""
     argocd_port_forward_pid=""
+    argocd_port_forward_result=""
+    argocd_effective_local_port="${argocd_local_port}"
     token_status=0
 
     set +e
     argocd_password="$(fetch_argocd_initial_admin_password "${KUBECONFIG_PATH}")"
     token_status="$?"
     if [[ "${token_status}" -eq 0 ]]; then
-      argocd_port_forward_pid="$(start_service_port_forward "${KUBECONFIG_PATH}" argocd argocd-server "${argocd_local_port}" 80)"
+      argocd_port_forward_result="$(start_service_port_forward_with_local_port_fallback "${KUBECONFIG_PATH}" argocd argocd-server "${argocd_local_port}" 80)"
       token_status="$?"
     fi
     if [[ "${token_status}" -eq 0 ]]; then
-      argocd_token="$(fetch_argocd_session_token "${argocd_password}" "${argocd_local_port}")"
+      IFS=$'\t' read -r argocd_port_forward_pid argocd_effective_local_port <<<"${argocd_port_forward_result}"
+      argocd_token="$(fetch_argocd_session_token "${argocd_password}" "${argocd_effective_local_port}")"
       token_status="$?"
     fi
     set -e

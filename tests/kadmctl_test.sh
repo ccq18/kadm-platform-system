@@ -889,6 +889,147 @@ STUB
   fi
 }
 
+test_configure_delivery_retries_argocd_port_forward_on_local_port_conflict() {
+  local tmp_home tmp_bin calls_file stdin_file port_ready_file tmp_app_configs
+  tmp_home="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  calls_file="${tmp_home}/calls.log"
+  stdin_file="${tmp_home}/stdin.log"
+  port_ready_file="${tmp_home}/argocd-port-ready"
+  tmp_app_configs="$(mktemp -d)"
+  mkdir -p "${tmp_home}/.kadm/clusters/home-prod" "${tmp_home}/.kube/kadm" "${tmp_home}/onecd-overlay"
+  mkdir -p "${tmp_app_configs}/apps/demo-hello/base" "${tmp_app_configs}/apps/demo-hello/overlays/prod"
+  cat > "${tmp_home}/.kadm/clusters/home-prod/cluster.env" <<'PROFILE'
+CLUSTER_NAME=home-prod
+MASTER_SSH=root@203.0.113.11
+MASTER_PRIVATE_IP=10.0.0.11
+KUBECONFIG_PATH=${HOME}/.kube/kadm/home-prod.yaml
+API_LOCAL_PORT=16445
+CONSOLE_LOCAL_PORT=18081
+PROFILE
+  touch "${tmp_home}/.kube/kadm/home-prod.yaml"
+  cat > "${tmp_app_configs}/apps/apps.json" <<'JSON'
+[
+  {
+    "id": "demo-hello",
+    "name": "Demo Hello",
+    "gitops": {
+      "owner": "ccq18",
+      "repo": "kadm-app-configs",
+      "path": "apps/demo-hello/overlays/prod",
+      "image": "ghcr.io/ccq18/demo-hello",
+      "ref": "main"
+    },
+    "argocd": {
+      "application": "demo-hello"
+    },
+    "rollout": {
+      "namespace": "apps",
+      "name": "hello"
+    }
+  }
+]
+JSON
+  cat > "${tmp_app_configs}/apps/demo-hello/base/ingress.yaml" <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello
+  namespace: apps
+spec:
+  ingressClassName: traefik
+YAML
+  cat > "${tmp_app_configs}/apps/demo-hello/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/demo-hello
+  newName: ghcr.io/ccq18/demo-hello
+  newTag: test-tag
+YAML
+
+  cat > "${tmp_bin}/ssh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"-N -L"* ]]; then
+  trap 'exit 0' TERM INT
+  while true; do sleep 1; done
+fi
+exit 0
+STUB
+  cat > "${tmp_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get secret argocd-initial-admin-secret"* ]]; then
+  printf 'YWRtaW4tcGFzcw=='
+  exit 0
+fi
+if [[ "$*" == *"patch configmap argocd-cm"* && "$*" == *"--patch-file"* ]]; then
+  cat "${@: -1}" >> "${ONECDCTL_TEST_STDIN}"
+  exit 0
+fi
+if [[ "$*" == *"get statefulset argocd-application-controller"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
+if [[ "$*" == *"get deploy kadm"* && "$*" == *"jsonpath"* ]]; then
+  printf '1 1'
+  exit 0
+fi
+if [[ "$*" == *"port-forward svc/argocd-server 18081:80"* ]]; then
+  printf 'Unable to listen on port 18081: Listeners failed to create with the following errors: [unable to create listener: Error listen tcp4 127.0.0.1:18081: bind: address already in use]\n' >&2
+  exit 1
+fi
+if [[ "$*" == *"port-forward svc/argocd-server 18082:80"* ]]; then
+  touch "${ONECDCTL_TEST_PORT_READY}"
+  printf 'Forwarding from 127.0.0.1:18082 -> 80\n'
+  trap 'exit 0' TERM INT
+  while true; do sleep 1; done
+fi
+if [[ "$*" == *"apply -f "* ]]; then
+  file="${@: -1}"
+  if [[ "${file}" == "-" ]]; then
+    cat >> "${ONECDCTL_TEST_STDIN}"
+  else
+    cat "${file}" >> "${ONECDCTL_TEST_STDIN}"
+  fi
+fi
+if [[ "$*" == *"create namespace"* ]]; then
+  printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: test\n'
+fi
+exit 0
+STUB
+  cat > "${tmp_bin}/curl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+[[ -f "${ONECDCTL_TEST_PORT_READY}" ]] || exit 7
+cat >/dev/null
+printf '{"token":"generated-argocd-token"}'
+STUB
+  cat > "${tmp_bin}/crane" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'crane %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == "auth login ghcr.io -u ccq18 --password-stdin" ]]; then
+  cat >/dev/null
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/ssh" "${tmp_bin}/kubectl" "${tmp_bin}/curl" "${tmp_bin}/crane"
+
+  local output
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_STDIN="${stdin_file}" ONECDCTL_TEST_PORT_READY="${port_ready_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" ONECD_GITHUB_TOKEN="secret-token" ONECD_GHCR_USERNAME="ccq18" ONECD_GHCR_TOKEN="ghcr-token" "${KADMCTL}" configure-delivery home-prod --ingress-mode traefik --onecd-overlay "${tmp_home}/onecd-overlay" --app-configs-dir "${tmp_app_configs}" --apply)"
+
+  assert_contains "${output}" "delivery configuration applied"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18081:80"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18082:80"
+  assert_file_line_order "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18081:80" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd port-forward svc/argocd-server 18082:80"
+  assert_file_contains "${calls_file}" "curl -fksSL --connect-timeout 10 --max-time 60 -H Content-Type: application/json --data-binary @- http://127.0.0.1:18082/api/v1/session"
+}
+
 test_configure_delivery_fails_fast_when_ghcr_preflight_fails() {
   local tmp_home tmp_bin calls_file tmp_app_configs
   tmp_home="$(mktemp -d)"
@@ -2495,6 +2636,7 @@ test_status_uses_profile_and_api_tunnel
 test_bootstrap_rejects_unsafe_profile_values
 test_configure_delivery_dry_run_describes_required_inputs
 test_configure_delivery_traefik_mode_applies_ingress_and_httproute_health
+test_configure_delivery_retries_argocd_port_forward_on_local_port_conflict
 test_configure_delivery_fails_fast_when_ghcr_preflight_fails
 test_configure_delivery_fails_fast_on_invalid_app_registry
 test_configure_delivery_legacy_release_console_overlay_uses_legacy_repo_path

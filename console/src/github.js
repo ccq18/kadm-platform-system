@@ -77,12 +77,41 @@ export function buildGitHubContentUpdateRequest({ token, owner, repo, path, bran
   };
 }
 
-export function updateKustomizeImageTag(content, tag) {
-  const updated = content.replace(/^(\s*newTag:\s*).+$/m, `$1${tag}`);
-  if (updated === content) {
-    throw new Error("kustomize image tag was not found");
+export function updateKustomizeImageTag(content, tag, imageName = null) {
+  const lines = content.split("\n");
+  let activeImageMatches = !imageName;
+  let updated = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const imageEntry = line.match(/^(\s*-\s*name:\s*)(\S+)\s*$/);
+    if (imageEntry) {
+      activeImageMatches = !imageName || imageEntry[2] === imageName;
+      continue;
+    }
+
+    const newNameEntry = line.match(/^(\s*newName:\s*)(\S+)\s*$/);
+    if (newNameEntry && imageName && newNameEntry[2] === imageName) {
+      activeImageMatches = true;
+      continue;
+    }
+
+    const tagEntry = line.match(/^(\s*newTag:\s*).+$/);
+    if (tagEntry && activeImageMatches && !updated) {
+      lines[index] = `${tagEntry[1]}${tag}`;
+      updated = true;
+    }
   }
-  return updated;
+
+  if (!updated) {
+    throw new Error(
+      imageName
+        ? `kustomize image tag was not found for image: ${imageName}`
+        : "kustomize image tag was not found"
+    );
+  }
+
+  return lines.join("\n");
 }
 
 export class GitHubClient {
@@ -133,7 +162,7 @@ export class GitHubClient {
     });
     const file = await sendJsonRequest(contentRequest, this.fetchImpl);
     const raw = Buffer.from(String(file.content || "").replace(/\n/g, ""), "base64").toString("utf8");
-    const updated = updateKustomizeImageTag(raw, imageTag);
+    const updated = updateKustomizeImageTag(raw, imageTag, app.gitops.image);
 
     const updateRequest = buildGitHubContentUpdateRequest({
       token: this.token,

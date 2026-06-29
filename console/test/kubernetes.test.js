@@ -25,8 +25,11 @@ test("builds a Rollout get request against the Kubernetes API", () => {
   assert.equal(request.headers.Authorization, "Bearer kube-token");
 });
 
-test("builds promote and abort Rollout status patches", () => {
+test("builds promote, full promote, and abort Rollout status patches", () => {
   assert.deepEqual(buildRolloutActionPatch("promote"), {
+    status: { pauseConditions: null }
+  });
+  assert.deepEqual(buildRolloutActionPatch("promote-full"), {
     status: { promoteFull: true }
   });
   assert.deepEqual(buildRolloutActionPatch("abort"), {
@@ -56,7 +59,7 @@ test("uses the status subresource for promote and abort", () => {
   );
   assert.equal(request.method, "PATCH");
   assert.equal(request.headers["Content-Type"], "application/merge-patch+json");
-  assert.deepEqual(JSON.parse(request.body), { status: { promoteFull: true } });
+  assert.deepEqual(JSON.parse(request.body), { status: { pauseConditions: null } });
 });
 
 test("builds a ReplicaSet list request for rollout revisions", () => {

@@ -3,7 +3,7 @@
 KADM Release Console is a small release console for two GitOps-managed demo applications. The UI presents two main release actions:
 
 - Publish: trigger build, deploy the produced GitOps change, and wait for canary check.
-- Promote: explicitly switch traffic to the current candidate version.
+- Promote: explicitly advance the current candidate version.
 
 ```text
 Browser
@@ -27,6 +27,6 @@ The application repositories own their source, Dockerfile, build workflow, and i
 
 Publish tasks are runtime-only state held in the KADM Release Console process. This is intentional for the first version: losing a task on restart is acceptable because stable traffic changes only when an operator explicitly promotes a candidate. After restart, KADM Release Console derives the visible state from GitHub workflow runs, Argo CD application status, and Argo Rollouts status.
 
-Version hints are derived from Rollout status fields such as `stableRS` and `currentPodHash`. KADM Release Console does not directly scale old ReplicaSets for version switching. Full historical rollback should remain GitOps-friendly: choose a historical image, update the app manifest in `kadm-app-configs`, sync Argo CD, canary check, then promote.
+Version hints are derived from Rollout status fields such as `stableRS` and `currentPodHash`. Candidate promotion is a Rollouts runtime action. Retained historical versions are released through GitOps: KADM extracts the retained ReplicaSet image tag, updates the app manifest in `kadm-app-configs`, syncs Argo CD, waits for the canary or blue-green check, then requires an explicit promote.
 
-Rollout `promote` and `abort` actions are implemented as Kubernetes API merge patches against the Rollout status subresource. If a future Argo Rollouts version or cluster policy rejects direct status patches, keep the same KADM Release Console API surface and swap the backend action implementation to Argo CD resource actions or a small internal gateway that runs the official `kubectl argo rollouts` plugin.
+Rollout `promote`, `promote-full`, and `abort` actions are implemented as Kubernetes API merge patches against the Rollout status subresource. Normal `promote` clears the current pause; `promote-full` is explicit and skips the remaining pause/check steps. If a future Argo Rollouts version or cluster policy rejects direct status patches, keep the same KADM Release Console API surface and swap the backend action implementation to Argo CD resource actions or a small internal gateway that runs the official `kubectl argo rollouts` plugin.

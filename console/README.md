@@ -64,6 +64,8 @@ http://127.0.0.1:18080
 | `POST` | `/api/apps/:id/release` | Build image, update GitOps, sync, and wait for rollout check |
 | `POST` | `/api/apps/:id/release/cancel` | Cancel the in-memory publish task |
 | `POST` | `/api/apps/:id/promote` | Promote the current candidate version |
+| `POST` | `/api/apps/:id/versions/:hash/switch` | Promote a candidate or release a retained version through GitOps |
+| `POST` | `/api/apps/:id/rollout/promote-full` | Fully promote the Rollout, skipping remaining checks |
 | `POST` | `/api/apps/:id/rollout/abort` | Abort the Rollout |
 | `POST` | `/api/apps/:id/rollout/restart` | Restart Rollout pods |
 | `GET` | `/api/cluster` | Read cluster node summary |
@@ -143,6 +145,8 @@ http://127.0.0.1:18080
 | `POST` | `/api/apps/:id/release` | Build image, update GitOps, sync, and wait for rollout check |
 | `POST` | `/api/apps/:id/release/cancel` | Cancel the in-memory publish task |
 | `POST` | `/api/apps/:id/promote` | Promote the current candidate version |
+| `POST` | `/api/apps/:id/versions/:hash/switch` | Promote a candidate or release a retained version through GitOps |
+| `POST` | `/api/apps/:id/rollout/promote-full` | Fully promote the Rollout, skipping remaining checks |
 | `POST` | `/api/apps/:id/rollout/abort` | Abort the Rollout |
 | `POST` | `/api/apps/:id/rollout/restart` | Restart Rollout pods |
 | `GET` | `/api/cluster` | Read cluster node summary |

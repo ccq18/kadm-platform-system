@@ -54,7 +54,7 @@ export class ArgoCdClient {
         baseUrl: this.baseUrl,
         token: this.token,
         application: app.argocd.application,
-        revision: app.github.ref,
+        revision: app.gitops.ref,
         insecureTLS: this.insecureTLS
       }),
       this.fetchImpl

@@ -86,3 +86,24 @@ images:
   assert.match(updated, /newTag: sha-new/);
   assert.doesNotMatch(updated, /newTag: sha-old/);
 });
+
+test("updates only the configured kustomize image tag", () => {
+  const updated = updateKustomizeImageTag(
+    `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/sidecar
+  newName: ghcr.io/ccq18/sidecar
+  newTag: sidecar-old
+- name: ghcr.io/ccq18/demo-hello
+  newName: ghcr.io/ccq18/demo-hello
+  newTag: demo-old
+`,
+    "demo-new",
+    "ghcr.io/ccq18/demo-hello"
+  );
+
+  assert.match(updated, /newTag: sidecar-old/);
+  assert.match(updated, /newTag: demo-new/);
+  assert.doesNotMatch(updated, /newTag: demo-old/);
+});

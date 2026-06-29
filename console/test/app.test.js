@@ -169,9 +169,27 @@ test("promote route rejects switching to the current stable version", async () =
   }
 });
 
-test("switch route moves all traffic to a retained version", async () => {
+test("switch route releases a retained version through GitOps instead of patching Rollout template", async () => {
   const calls = [];
   const server = await listen({
+    github: {
+      async listWorkflowRuns() {
+        return [];
+      },
+      async updateGitOpsApp(app, imageTag) {
+        calls.push({ type: "gitops", appId: app.id, imageTag });
+        return { updated: true, imageTag };
+      }
+    },
+    argocd: {
+      async getApplication() {
+        return { status: { sync: { status: "Synced" }, health: { status: "Healthy" } } };
+      },
+      async syncApplication(app) {
+        calls.push({ type: "sync", appId: app.id });
+        return { operation: "started" };
+      }
+    },
     rollouts: {
       async getRollout() {
         return { status: { phase: "Healthy", stableRS: "new-hash", currentPodHash: "new-hash" } };
@@ -184,7 +202,7 @@ test("switch route moves all traffic to a retained version", async () => {
               creationTimestamp: "2026-06-28T00:00:00Z",
               labels: { "rollouts-pod-template-hash": "new-hash" }
             },
-            spec: { replicas: 2, template: { metadata: { labels: { "app.kubernetes.io/name": "hello" } }, spec: { containers: [{ name: "hello", image: "new" }] } } },
+            spec: { replicas: 2, template: { metadata: { labels: { "app.kubernetes.io/name": "hello" } }, spec: { containers: [{ name: "hello", image: "ghcr.io/ccq18/demo-hello:sha-new" }] } } },
             status: { replicas: 2, readyReplicas: 2 }
           },
           {
@@ -193,14 +211,13 @@ test("switch route moves all traffic to a retained version", async () => {
               creationTimestamp: "2026-06-27T00:00:00Z",
               labels: { "rollouts-pod-template-hash": "old-hash" }
             },
-            spec: { replicas: 0, template: { metadata: { labels: { "app.kubernetes.io/name": "hello" } }, spec: { containers: [{ name: "hello", image: "old" }] } } },
+            spec: { replicas: 0, template: { metadata: { labels: { "app.kubernetes.io/name": "hello" } }, spec: { containers: [{ name: "hello", image: "ghcr.io/ccq18/demo-hello:sha-old" }] } } },
             status: { replicas: 0, readyReplicas: 0 }
           }
         ];
       },
-      async switchVersion(app, version) {
-        calls.push({ appId: app.id, hash: version.hash, resourceName: version.resourceName });
-        return { switched: true };
+      async switchVersion() {
+        throw new Error("switch should not patch the live Rollout template");
       },
       async runAction() {
         return {};
@@ -214,7 +231,37 @@ test("switch route moves all traffic to a retained version", async () => {
     });
 
     assert.equal(data.version.hash, "old-hash");
-    assert.deepEqual(calls, [{ appId: "demo-hello", hash: "old-hash", resourceName: "hello-old-hash" }]);
+    assert.equal(data.result.imageTag, "sha-old");
+    assert.deepEqual(calls, [
+      { type: "gitops", appId: "demo-hello", imageTag: "sha-old" },
+      { type: "sync", appId: "demo-hello" }
+    ]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("full promote route is explicit and separate from normal promote", async () => {
+  const calls = [];
+  const server = await listen({
+    rollouts: {
+      async getRollout() {
+        return { status: { phase: "Paused", stableRS: "old-hash", currentPodHash: "new-hash" } };
+      },
+      async runAction(app, action) {
+        calls.push({ appId: app.id, action });
+        return { patched: true };
+      }
+    }
+  });
+
+  try {
+    const data = await request(server, "/api/apps/demo-hello/rollout/promote-full", {
+      method: "POST"
+    });
+
+    assert.equal(data.action, "promote-full");
+    assert.deepEqual(calls, [{ appId: "demo-hello", action: "promote-full" }]);
   } finally {
     await close(server);
   }

@@ -170,7 +170,9 @@ export function createApp({ apps, appRegistry, sourceProjectRegistry, github, ar
         loadReplicaSets(rollouts, app)
       ]);
       const version = validateSwitchVersion(deriveRolloutVersions(rollout, replicaSets), req.params.hash);
-      const result = await rollouts.switchVersion(app, version, replicaSets);
+      const result = version.role === "candidate"
+        ? await rollouts.runAction(app, "promote")
+        : await releaseRetainedVersionThroughGitOps({ app, version, replicaSets, github, argocd });
       res.status(202).json({ app: publicApp(app), version, result });
     } catch (error) {
       next(error);
@@ -245,7 +247,7 @@ export function createApp({ apps, appRegistry, sourceProjectRegistry, github, ar
       const app = await registry.getApp(req.params.id);
       const action = req.params.action;
       logActionRequest(`rollout/${action}`, app, req.body);
-      if (!["promote", "abort", "restart"].includes(action)) {
+      if (!["promote", "promote-full", "abort", "restart"].includes(action)) {
         res.status(400).json({ error: "Unsupported rollout action." });
         return;
       }
@@ -335,4 +337,52 @@ function logActionRequest(action, app, body) {
       body: body || {}
     })
   );
+}
+
+async function releaseRetainedVersionThroughGitOps({ app, version, replicaSets, github, argocd }) {
+  const imageTag = imageTagForVersion(app, version, replicaSets);
+  const gitops = await github.updateGitOpsApp(app, imageTag);
+  const sync = await argocd.syncApplication(app);
+  return { gitops, sync, imageTag };
+}
+
+function imageTagForVersion(app, version, replicaSets) {
+  const replicaSet = replicaSets.find((candidate) => candidate.metadata?.name === version.resourceName);
+  if (!replicaSet) {
+    throwVersionError(`ReplicaSet not found for version: ${version.hash}`);
+  }
+
+  const image = configuredContainerImage(replicaSet, app.gitops.image);
+  if (!image) {
+    throwVersionError(`Configured image not found for version: ${version.hash}`);
+  }
+
+  return imageTagFromConfiguredImage(image, app.gitops.image);
+}
+
+function configuredContainerImage(replicaSet, configuredImage) {
+  const containers = replicaSet?.spec?.template?.spec?.containers || [];
+  const container = containers.find((candidate) => imageMatchesRepository(candidate.image, configuredImage));
+  return container?.image || null;
+}
+
+function imageMatchesRepository(image, repository) {
+  return image === repository || image?.startsWith(`${repository}:`) || image?.startsWith(`${repository}@`);
+}
+
+function imageTagFromConfiguredImage(image, repository) {
+  if (image.startsWith(`${repository}:`)) {
+    const tag = image.slice(repository.length + 1).split("@")[0];
+    if (tag) {
+      return tag;
+    }
+  }
+
+  throwVersionError(`Configured image does not contain a tag: ${image}`);
+}
+
+function throwVersionError(message) {
+  const error = new Error(message);
+  error.status = 409;
+  throw error;
 }

@@ -60,12 +60,13 @@ Apply Release Console:
 kubectl apply -k console/k8s/overlays/prod
 ```
 
-Create app Applications from `kadm-app-configs`, not from application source repositories:
+Do not treat application overlays as the standard deployment entrypoint. The current path is to register repositories and applications through `kadmctl configure-delivery`, which creates the Argo CD repository credentials, app registry ConfigMap, and Argo CD `Application` resources.
 
 ```bash
-kubectl apply -k ../kadm-app-configs/apps/demo-hello/overlays/prod
-kubectl apply -k ../kadm-app-configs/apps/demo-hello-spring/overlays/prod
+kadmctl configure-delivery <cluster> --app-configs-dir /path/to/kadm-app-configs --apply
 ```
+
+If a recovery workflow needs to recreate missing application registrations, rerun `kadmctl configure-delivery`. Avoid making direct business-application rollout changes from this document unless you are explicitly doing temporary debugging or incident recovery.
 
 ## 4. Access
 

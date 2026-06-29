@@ -525,8 +525,9 @@ function renderVersionInventory(versions) {
               ? "稳定版本"
               : "历史版本";
           const trafficText = version.receivingTraffic ? "接入流量" : "无流量";
+          const switchLabel = version.role === "candidate" ? "放量" : "发布此版本";
           const switchButton = version.canSwitch
-            ? `<button class="secondary-action version-switch-button" type="button" data-version-hash="${escapeHtml(version.hash)}">切换</button>`
+            ? `<button class="secondary-action version-switch-button" type="button" data-version-hash="${escapeHtml(version.hash)}" data-version-role="${escapeHtml(version.role)}">${escapeHtml(switchLabel)}</button>`
             : "";
           const deleteButton = version.canDelete
             ? `<button class="secondary-action version-delete-button" type="button" data-version-hash="${escapeHtml(version.hash)}">删除版本</button>`
@@ -547,7 +548,10 @@ function renderVersionInventory(versions) {
     : `<p class="empty-state">暂无版本数据。</p>`;
 
   for (const button of versionInventory.querySelectorAll(".version-switch-button")) {
-    button.addEventListener("click", () => switchVersion(button.getAttribute("data-version-hash")));
+    button.addEventListener("click", () => switchVersion(
+      button.getAttribute("data-version-hash"),
+      button.getAttribute("data-version-role")
+    ));
   }
   for (const button of versionInventory.querySelectorAll(".version-delete-button")) {
     button.addEventListener("click", () => deleteVersion(button.getAttribute("data-version-hash")));
@@ -576,24 +580,30 @@ function actionBody(action) {
   return {};
 }
 
-async function switchVersion(versionHash) {
+async function switchVersion(versionHash, versionRole) {
   if (!activeAppId || !versionHash) {
     return;
   }
-  const confirmed = window.confirm(`确认把所有流量切换到版本 ${versionHash} 吗？`);
+  const isCandidate = versionRole === "candidate";
+  const actionText = isCandidate ? "放量候选版本" : "通过 GitOps 发布历史版本";
+  const confirmed = window.confirm(`确认${actionText} ${versionHash} 吗？`);
   if (!confirmed) {
     return;
   }
 
   try {
-    notice.textContent = `正在切换到版本 ${versionHash}`;
+    notice.textContent = isCandidate
+      ? `正在放量版本 ${versionHash}`
+      : `正在通过 GitOps 发布版本 ${versionHash}`;
     await api(`/api/apps/${encodeURIComponent(activeAppId)}/versions/${encodeURIComponent(versionHash)}/switch`, {
       method: "POST"
     });
-    notice.textContent = `已切换到版本 ${versionHash}`;
+    notice.textContent = isCandidate
+      ? `已放量版本 ${versionHash}`
+      : `已提交 GitOps 版本 ${versionHash}`;
     await refreshStatus();
   } catch (error) {
-    notice.textContent = `切换版本失败：${error.message}`;
+    notice.textContent = `${actionText}失败：${error.message}`;
   }
 }
 

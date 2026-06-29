@@ -78,16 +78,11 @@ export function buildReplicaSetDeleteRequest({ apiServer, token, namespace, repl
   };
 }
 
-export function buildRolloutTemplatePatch(template) {
-  return {
-    spec: {
-      template
-    }
-  };
-}
-
 export function buildRolloutActionPatch(action, now = new Date()) {
   if (action === "promote") {
+    return { status: { pauseConditions: null } };
+  }
+  if (action === "promote-full") {
     return { status: { promoteFull: true } };
   }
   if (action === "abort") {
@@ -100,7 +95,7 @@ export function buildRolloutActionPatch(action, now = new Date()) {
 }
 
 export function buildRolloutActionRequest({ apiServer, token, namespace, rollout, action, now }) {
-  const usesStatusSubresource = action === "promote" || action === "abort";
+  const usesStatusSubresource = ["promote", "promote-full", "abort"].includes(action);
   const url = usesStatusSubresource
     ? `${rolloutUrl(apiServer, namespace, rollout)}/status`
     : rolloutUrl(apiServer, namespace, rollout);
@@ -112,17 +107,6 @@ export function buildRolloutActionRequest({ apiServer, token, namespace, rollout
       "Content-Type": "application/merge-patch+json"
     }),
     body: JSON.stringify(buildRolloutActionPatch(action, now))
-  };
-}
-
-export function buildRolloutTemplatePatchRequest({ apiServer, token, namespace, rollout, template }) {
-  return {
-    url: rolloutUrl(apiServer, namespace, rollout),
-    method: "PATCH",
-    headers: jsonHeaders(token, {
-      "Content-Type": "application/merge-patch+json"
-    }),
-    body: JSON.stringify(buildRolloutTemplatePatch(template))
   };
 }
 
@@ -216,37 +200,6 @@ export class KubernetesRolloutsClient {
         token: this.token,
         namespace: app.rollout.namespace,
         replicaSet
-      }),
-      this.fetchImpl
-    );
-  }
-
-  async switchVersion(app, version, replicaSets) {
-    const replicaSet = replicaSets.find(
-      (candidate) => candidate.metadata?.name === version.resourceName
-    );
-    if (!replicaSet?.spec?.template) {
-      throw new Error(`ReplicaSet template not found for version: ${version.hash}`);
-    }
-
-    await sendJsonRequest(
-      buildRolloutTemplatePatchRequest({
-        apiServer: this.apiServer,
-        token: this.token,
-        namespace: app.rollout.namespace,
-        rollout: app.rollout.name,
-        template: sanitizeReplicaSetTemplate(replicaSet.spec.template)
-      }),
-      this.fetchImpl
-    );
-
-    return sendJsonRequest(
-      buildRolloutActionRequest({
-        apiServer: this.apiServer,
-        token: this.token,
-        namespace: app.rollout.namespace,
-        rollout: app.rollout.name,
-        action: "promote"
       }),
       this.fetchImpl
     );
@@ -383,21 +336,6 @@ function timestampOf(event) {
   const value = event?.lastTimestamp || event?.eventTime || event?.metadata?.creationTimestamp || "";
   const time = Date.parse(value);
   return Number.isNaN(time) ? 0 : time;
-}
-
-function sanitizeReplicaSetTemplate(template) {
-  const clone = structuredClone(template);
-  if (clone.metadata?.labels) {
-    delete clone.metadata.labels["rollouts-pod-template-hash"];
-    delete clone.metadata.labels["pod-template-hash"];
-  }
-  if (clone.metadata) {
-    delete clone.metadata.creationTimestamp;
-    delete clone.metadata.uid;
-    delete clone.metadata.resourceVersion;
-    delete clone.metadata.managedFields;
-  }
-  return clone;
 }
 
 function rolloutUrl(apiServer, namespace, rollout) {
