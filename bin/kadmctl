@@ -2261,7 +2261,7 @@ update_overlay_image_tag() {
 
   if ! awk -v tag="${tag}" '
     /^  newTag:/ && !updated {
-      print "  newTag: " tag
+      print "  newTag: \"" tag "\""
       updated = 1
       next
     }
@@ -2308,7 +2308,7 @@ update_overlay_image() {
       next
     }
     /^  newTag:/ && !updated_tag {
-      print "  newTag: " tag
+      print "  newTag: \"" tag "\""
       updated_tag = 1
       next
     }

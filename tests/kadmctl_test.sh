@@ -1765,18 +1765,18 @@ PROFILE
   touch "${tmp_home}/.kube/kadm/kadm-test.yaml"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" publish-release-console kadm-test --repo-dir "${tmp_onecd}" --tag test-123 --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" publish-release-console kadm-test --repo-dir "${tmp_onecd}" --tag 20260630060828 --apply)"
 
-  assert_contains "${output}" "updated GitOps image: ghcr.io/ccq18/kadm-platform-system:test-123"
+  assert_contains "${output}" "updated GitOps image: ghcr.io/ccq18/kadm-platform-system:20260630060828"
   assert_contains "${output}" "deployment/kadm ready: 1/1"
-  assert_contains "${output}" "release console published: ghcr.io/ccq18/kadm-platform-system:test-123"
+  assert_contains "${output}" "release console published: ghcr.io/ccq18/kadm-platform-system:20260630060828"
   assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} config --get remote.origin.url"
   assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} fetch origin main --quiet"
   assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} add ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
-  assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} commit -m chore: release kadm-platform-system test-123"
+  assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} commit -m chore: release kadm-platform-system 20260630060828"
   assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} push origin HEAD:main"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/kadm-test.yaml --request-timeout=30s -n argocd patch application kadm-platform-system --type merge -p {\"operation\":{\"sync\":{\"revision\":\"main\"}}}"
-  assert_file_contains "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" "newTag: test-123"
+  assert_file_contains "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" "newTag: \"20260630060828\""
 }
 
 test_publish_release_console_rejects_dirty_repo() {
