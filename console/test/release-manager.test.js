@@ -121,6 +121,51 @@ test("reports blue-green preview waiting for manual traffic switch", async () =>
   assert.match(completed.message, /等待切换流量/);
 });
 
+test("generates timestamp image tags when publish input is omitted", async () => {
+  const events = [];
+  let runPolls = 0;
+  const manager = new ReleaseManager({
+    github: {
+      async dispatchWorkflow(_targetApp, { imageTag }) {
+        events.push(`dispatch:${imageTag}`);
+        return { dispatched: true };
+      },
+      async updateGitOpsApp(_targetApp, imageTag) {
+        events.push(`gitops:${imageTag}`);
+        return { updated: true };
+      },
+      async listWorkflowRuns() {
+        runPolls += 1;
+        return runPolls === 1
+          ? []
+          : [{ id: 1, status: "completed", conclusion: "success", created_at: "2026-06-26T09:08:08.000Z" }];
+      }
+    },
+    argocd: {
+      async syncApplication() {
+        return {};
+      },
+      async getApplication() {
+        return { status: { sync: { status: "Synced" }, operationState: { phase: "Succeeded" } } };
+      }
+    },
+    rollouts: {
+      async getRollout() {
+        return { status: { phase: "Paused", stableRS: "old-hash", currentPodHash: "new-hash" } };
+      }
+    },
+    now: () => new Date(2026, 5, 26, 9, 8, 7),
+    pollIntervalMs: 0
+  });
+
+  const started = manager.start(app);
+  const completed = await manager.waitFor(app.id);
+
+  assert.equal(started.imageTag, "20260626090807");
+  assert.equal(completed.status, "succeeded");
+  assert.deepEqual(events, ["dispatch:20260626090807", "gitops:20260626090807"]);
+});
+
 test("waits for the workflow run created by this publish", async () => {
   let runPolls = 0;
   const manager = new ReleaseManager({
@@ -129,7 +174,7 @@ test("waits for the workflow run created by this publish", async () => {
         return { dispatched: true };
       },
       async updateGitOpsApp(_targetApp, imageTag) {
-        assert.equal(imageTag, "sha-abcdef0");
+        assert.equal(imageTag, "20260626000001");
         return { updated: true };
       },
       async listWorkflowRuns() {
@@ -159,7 +204,7 @@ test("waits for the workflow run created by this publish", async () => {
         return { status: { phase: "Paused", stableRS: "old-hash", currentPodHash: "new-hash" } };
       }
     },
-    now: () => new Date("2026-06-26T00:00:01.000Z"),
+    now: () => new Date(2026, 5, 26, 0, 0, 1),
     pollIntervalMs: 0
   });
 

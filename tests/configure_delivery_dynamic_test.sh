@@ -22,6 +22,47 @@ assert_file_contains() {
   }
 }
 
+assert_application_automated_state() {
+  local file="$1"
+  local application="$2"
+  local expected="$3"
+  python3 - "${file}" "${application}" "${expected}" <<'PY'
+import sys
+
+path, application, expected = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+with open(path, "r", encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+
+documents = []
+current = []
+for line in lines:
+    if line.startswith("apiVersion: ") and current:
+        documents.append(current)
+        current = [line]
+    else:
+        current.append(line)
+if current:
+    documents.append(current)
+
+matches = [
+    doc for doc in documents
+    if any(line.strip() == "kind: Application" for line in doc)
+    and any(line.strip() == f"name: {application}" for line in doc)
+]
+if not matches:
+    print(f"missing Application {application}", file=sys.stderr)
+    sys.exit(1)
+
+has_automated = any(any(line.strip() == "automated:" for line in doc) for doc in matches)
+if has_automated != expected:
+    print(f"Application {application} automated={has_automated}, expected {expected}", file=sys.stderr)
+    for doc in matches:
+        print("---", file=sys.stderr)
+        print("\n".join(doc), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 test_configure_delivery_uses_apps_json_to_reconcile_applications() {
   local tmp_home tmp_bin calls_file stdin_file tmp_app_configs
   tmp_home="$(mktemp -d)"
@@ -158,6 +199,9 @@ STUB
   assert_file_contains "${stdin_file}" "gatewayClassName: cilium"
   assert_file_contains "${stdin_file}" "name: apps-gateway-tls"
   assert_file_contains "${stdin_file}" "protocol: HTTPS"
+  assert_application_automated_state "${stdin_file}" "kadm-platform-system" "false"
+  assert_application_automated_state "${stdin_file}" "alpha" "false"
+  assert_application_automated_state "${stdin_file}" "beta" "false"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd patch configmap argocd-cm --type merge --patch-file"
   assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/home-prod.yaml --request-timeout=30s -n argocd delete application legacy-one --ignore-not-found"
 }

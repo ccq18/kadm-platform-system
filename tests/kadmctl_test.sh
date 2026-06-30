@@ -1595,7 +1595,7 @@ STUB
   fi
 }
 
-test_publish_release_console_dry_run_prints_ci_plan() {
+test_publish_release_console_dry_run_prints_manual_publish_plan() {
   local tmp_onecd tmp_bin
   tmp_onecd="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
@@ -1612,6 +1612,9 @@ YAML
   cat > "${tmp_bin}/git" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  shift 2
+fi
 if [[ "${1:-}" == "-C" ]]; then
   shift 2
 fi
@@ -1623,22 +1626,64 @@ STUB
   chmod +x "${tmp_bin}/git"
 
   local output
-  output="$(PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-release-console --repo-dir "${tmp_onecd}" --tag test-123 --dry-run)"
+  output="$(PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-release-console kadm-test --repo-dir "${tmp_onecd}" --tag test-123 --dry-run)"
 
-  assert_contains "${output}" "DRY RUN: KADM release console release will not be triggered"
+  assert_contains "${output}" "DRY RUN: KADM release console image will not be published"
+  assert_contains "${output}" "cluster: kadm-test"
   assert_contains "${output}" "repo dir: ${tmp_onecd}"
   assert_contains "${output}" "image: ghcr.io/ccq18/kadm-platform-system:test-123"
-  assert_contains "${output}" "workflow: build-platform-system-image.yaml"
   assert_contains "${output}" "ref: main"
   assert_contains "${output}" "updates overlay: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
+  assert_contains "${output}" "commits: chore: release kadm-platform-system test-123"
+  assert_contains "${output}" "syncs Argo CD application: kadm-platform-system"
 }
 
-test_publish_release_console_apply_triggers_github_actions_and_pulls_overlay() {
-  local tmp_onecd tmp_bin calls_file gh_state_file
+test_publish_release_console_requires_an_explicit_image() {
+  local tmp_onecd tmp_bin
   tmp_onecd="$(mktemp -d)"
   tmp_bin="$(mktemp -d)"
+  mkdir -p "${tmp_onecd}/k8s/overlays/prod"
+  cat > "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: ghcr.io/ccq18/kadm-platform-system
+  newName: ghcr.io/ccq18/kadm-platform-system
+  newTag: old
+YAML
+
+  cat > "${tmp_bin}/git" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  shift 2
+fi
+if [[ "${1:-}" == "-C" ]]; then
+  shift 2
+fi
+if [[ "${1:-}" == "config" ]]; then
+  printf 'git@github.com:ccq18/kadm-platform-system.git\n'
+fi
+exit 0
+STUB
+  chmod +x "${tmp_bin}/git"
+
+  local output status
+  set +e
+  output="$(PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-release-console --repo-dir "${tmp_onecd}" --dry-run 2>&1)"
+  status="$?"
+  set -e
+
+  [[ "${status}" -ne 0 ]] || fail "publish accepted a missing image"
+  assert_contains "${output}" "release console image is required"
+}
+
+test_publish_release_console_apply_updates_gitops_and_syncs_argocd() {
+  local tmp_onecd tmp_bin tmp_home calls_file
+  tmp_onecd="$(mktemp -d)"
+  tmp_bin="$(mktemp -d)"
+  tmp_home="$(mktemp -d)"
   calls_file="${tmp_onecd}/calls.log"
-  gh_state_file="${tmp_onecd}/gh-state"
   mkdir -p "${tmp_onecd}/k8s/overlays/prod"
   cat > "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -1655,6 +1700,9 @@ YAML
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'git %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "${1:-}" == "-c" ]]; then
+  shift 2
+fi
 if [[ "${1:-}" == "-C" ]]; then
   shift 2
 fi
@@ -1663,6 +1711,9 @@ case "${1:-}" in
     printf 'git@github.com:ccq18/kadm-platform-system.git\n'
     ;;
   diff)
+    if [[ "$*" == *" -- "* ]]; then
+      exit 1
+    fi
     exit 0
     ;;
   ls-files)
@@ -1676,47 +1727,56 @@ case "${1:-}" in
       printf 'abc1234\n'
     fi
     ;;
-  pull)
+  add|commit|push)
     exit 0
     ;;
 esac
 exit 0
 STUB
-  cat > "${tmp_bin}/gh" <<'STUB'
+  cat > "${tmp_bin}/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'gh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
-case "${1:-}" in
-  workflow)
-    printf 'run queued\n'
-    printf 'new\n' > "${ONECDCTL_TEST_GH_STATE}"
-    ;;
-  run)
-    if [[ "${2:-}" == "list" ]]; then
-      if [[ -f "${ONECDCTL_TEST_GH_STATE}" ]]; then
-        printf '12345\n'
-      fi
-      exit 0
-    fi
-    if [[ "${2:-}" == "watch" ]]; then
-      exit 0
-    fi
-    ;;
-esac
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "$*" == *"get --raw=/readyz"* ]]; then
+  printf 'ok\n'
+  exit 0
+fi
+if [[ "$*" == *"-n argocd patch application kadm-platform-system"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *"-n kadm get deploy kadm -o jsonpath="* ]]; then
+  printf '1 1\n'
+  exit 0
+fi
 exit 0
 STUB
-  chmod +x "${tmp_bin}/git" "${tmp_bin}/gh"
+  chmod +x "${tmp_bin}/git" "${tmp_bin}/kubectl"
+  mkdir -p "${tmp_home}/.kadm/clusters/kadm-test" "${tmp_home}/.kube/kadm"
+  cat > "${tmp_home}/.kadm/clusters/kadm-test/cluster.env" <<PROFILE
+CLUSTER_NAME=kadm-test
+MASTER_SSH=root@127.0.0.1
+MASTER_PRIVATE_IP=127.0.0.1
+KUBECONFIG_PATH=${tmp_home}/.kube/kadm/kadm-test.yaml
+API_LOCAL_PORT=16443
+CONSOLE_LOCAL_PORT=18080
+K3S_JOIN_SERVER_URL=https://127.0.0.1:6443
+K3S_JOIN_TOKEN=test-token
+PROFILE
+  touch "${tmp_home}/.kube/kadm/kadm-test.yaml"
 
   local output
-  output="$(ONECDCTL_TEST_CALLS="${calls_file}" ONECDCTL_TEST_GH_STATE="${gh_state_file}" PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-release-console --repo-dir "${tmp_onecd}" --tag test-123 --apply)"
+  output="$(ONECDCTL_TEST_CALLS="${calls_file}" PATH="${tmp_bin}:${PATH}" HOME="${tmp_home}" "${KADMCTL}" publish-release-console kadm-test --repo-dir "${tmp_onecd}" --tag test-123 --apply)"
 
-  assert_contains "${output}" "triggered KADM release console workflow run: 12345"
-  assert_contains "${output}" "updated overlay from git: ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
-  assert_file_contains "${calls_file}" "git -C ${tmp_onecd} config --get remote.origin.url"
-  assert_file_contains "${calls_file}" "git -C ${tmp_onecd} fetch origin main --quiet"
-  assert_file_contains "${calls_file}" "gh workflow run build-platform-system-image.yaml --repo ccq18/kadm-platform-system --ref main -f image_tag=test-123"
-  assert_file_contains "${calls_file}" "gh run watch 12345 --repo ccq18/kadm-platform-system --exit-status"
-  assert_file_contains "${calls_file}" "git -C ${tmp_onecd} pull --ff-only origin main"
+  assert_contains "${output}" "updated GitOps image: ghcr.io/ccq18/kadm-platform-system:test-123"
+  assert_contains "${output}" "deployment/kadm ready: 1/1"
+  assert_contains "${output}" "release console published: ghcr.io/ccq18/kadm-platform-system:test-123"
+  assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} config --get remote.origin.url"
+  assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} fetch origin main --quiet"
+  assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} add ${tmp_onecd}/k8s/overlays/prod/kustomization.yaml"
+  assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} commit -m chore: release kadm-platform-system test-123"
+  assert_file_contains "${calls_file}" "git -c safe.directory=${tmp_onecd} -C ${tmp_onecd} push origin HEAD:main"
+  assert_file_contains "${calls_file}" "kubectl --kubeconfig ${tmp_home}/.kube/kadm/kadm-test.yaml --request-timeout=30s -n argocd patch application kadm-platform-system --type merge -p {\"operation\":{\"sync\":{\"revision\":\"main\"}}}"
+  assert_file_contains "${tmp_onecd}/k8s/overlays/prod/kustomization.yaml" "newTag: test-123"
 }
 
 test_publish_release_console_rejects_dirty_repo() {
@@ -1738,6 +1798,9 @@ YAML
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'git %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+if [[ "${1:-}" == "-c" ]]; then
+  shift 2
+fi
 if [[ "${1:-}" == "-C" ]]; then
   shift 2
 fi
@@ -1751,13 +1814,13 @@ case "${1:-}" in
 esac
 exit 0
 STUB
-  cat > "${tmp_bin}/gh" <<'STUB'
+  cat > "${tmp_bin}/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'gh %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
+printf 'kubectl %s\n' "$*" >> "${ONECDCTL_TEST_CALLS}"
 exit 0
 STUB
-  chmod +x "${tmp_bin}/git" "${tmp_bin}/gh"
+  chmod +x "${tmp_bin}/git" "${tmp_bin}/kubectl"
 
   local output status
   set +e
@@ -1786,6 +1849,9 @@ YAML
   cat > "${tmp_bin}/git" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  shift 2
+fi
 if [[ "${1:-}" == "-C" ]]; then
   shift 2
 fi
@@ -1799,7 +1865,7 @@ STUB
   local output
   output="$(PATH="${tmp_bin}:${PATH}" "${KADMCTL}" publish-onecd --onecd-dir "${tmp_onecd}" --tag test-123 --dry-run)"
 
-  assert_contains "${output}" "DRY RUN: KADM release console release will not be triggered"
+  assert_contains "${output}" "DRY RUN: KADM release console image will not be published"
 }
 
 test_install_tools_dry_run_is_script_managed() {
@@ -2638,8 +2704,9 @@ test_configure_delivery_fails_fast_when_ghcr_preflight_fails
 test_configure_delivery_fails_fast_on_invalid_app_registry
 test_configure_delivery_legacy_overlay_uses_system_repo_path
 test_configure_delivery_apply_creates_secrets_without_token_in_arguments
-test_publish_release_console_dry_run_prints_ci_plan
-test_publish_release_console_apply_triggers_github_actions_and_pulls_overlay
+test_publish_release_console_dry_run_prints_manual_publish_plan
+test_publish_release_console_requires_an_explicit_image
+test_publish_release_console_apply_updates_gitops_and_syncs_argocd
 test_publish_release_console_rejects_dirty_repo
 test_publish_onecd_alias_still_works
 test_install_tools_dry_run_is_script_managed

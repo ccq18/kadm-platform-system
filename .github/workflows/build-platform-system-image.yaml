@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Optional image tag. Defaults to sha-<short commit>.
+        description: Optional image tag. Defaults to UTC YYYYMMDDHHMMSS.
         required: false
         type: string
   push:
@@ -15,7 +15,7 @@ on:
       - .github/workflows/build-platform-system-image.yaml
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 concurrency:
@@ -56,7 +56,7 @@ jobs:
           if [ -n "${{ inputs.image_tag }}" ]; then
             tag="${{ inputs.image_tag }}"
           else
-            tag="sha-${GITHUB_SHA::7}"
+            tag="$(date -u +%Y%m%d%H%M%S)"
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/ccq18/kadm-platform-system:${tag}" >> "$GITHUB_OUTPUT"
@@ -79,32 +79,5 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}
 
-      - name: Install Kustomize
-        env:
-          KUSTOMIZE_VERSION: v5.4.2
-        run: |
-          tmp="$(mktemp -d)"
-          curl -fsSL --retry 3 --retry-delay 2 \
-            -o "${tmp}/kustomize.tar.gz" \
-            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          tar -xzf "${tmp}/kustomize.tar.gz" -C "${tmp}" kustomize
-          sudo install -m 0755 "${tmp}/kustomize" /usr/local/bin/kustomize
-          kustomize version
-
-      - name: Update prod image tag
-        run: |
-          cd k8s/overlays/prod
-          kustomize edit set image ghcr.io/ccq18/kadm-platform-system=ghcr.io/ccq18/kadm-platform-system:${{ steps.meta.outputs.tag }}
-
-      - name: Commit manifest update
-        working-directory: .
-        run: |
-          if git diff --quiet; then
-            echo "No manifest changes."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add console/k8s/overlays/prod/kustomization.yaml
-          git commit -m "chore: release kadm-platform-system ${{ steps.meta.outputs.tag }}"
-          git push
+      - name: Print image
+        run: echo "${{ steps.meta.outputs.image }}"

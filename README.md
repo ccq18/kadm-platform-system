@@ -104,9 +104,8 @@ kadmctl status kadm-test
 kadmctl reset-node root@<host> --dry-run
 kadmctl reset-node root@<host> --apply
 
-# 发布/更新 Release Console 镜像
-export KADM_GITHUB_TOKEN=<github-token>
-kadmctl publish-release-console --tag <image-tag> --apply
+# 发布/更新已构建的 Release Console 镜像
+kadmctl publish-release-console kadm-test --tag <image-tag> --apply
 
 # 重新配置交付凭据和应用注册表
 export KADM_GITHUB_TOKEN=<github-token>
@@ -238,8 +237,7 @@ kadmctl status kadm-test
 kadmctl reset-node root@<host> --dry-run
 kadmctl reset-node root@<host> --apply
 
-export KADM_GITHUB_TOKEN=<github-token>
-kadmctl publish-release-console --tag <image-tag> --apply
+kadmctl publish-release-console kadm-test --tag <image-tag> --apply
 
 export KADM_GITHUB_TOKEN=<github-token>
 export KADM_GHCR_USERNAME=<github-user>

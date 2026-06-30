@@ -45,8 +45,8 @@ Usage:
   kadmctl prepare-assets [--refresh] [--dry-run|--apply]
   kadmctl export-assets --output <path>
   kadmctl import-assets <path>
-  kadmctl publish-release-console [--repo-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
-  kadmctl publish-onecd [--onecd-dir <path>] [--tag <tag>] [--ref <branch>] [--workflow <file>] [--dry-run|--apply]
+  kadmctl publish-release-console [cluster] (--image <image>|--tag <tag>) [--repo-dir <path>] [--ref <branch>] [--dry-run|--apply]
+  kadmctl publish-onecd [cluster] (--image <image>|--tag <tag>) [--onecd-dir <path>] [--ref <branch>] [--dry-run|--apply]
   kadmctl configure-delivery [cluster] [--onecd-overlay <path>] [--app-configs-dir <path>] [--argocd-base-url <url>] [--argocd-local-port <port>] [--ingress-mode <gateway|traefik>] [--dry-run|--apply]
   kadmctl configure-demo-apps [cluster] [--app-configs-dir <path>] [--db-ssh-target <ssh-target>] [--db-node-ip <ip>] [--dry-run|--apply]
   kadmctl configure-cluster-dns [cluster] [--upstream <ip>]... [--dry-run|--apply]
@@ -64,7 +64,7 @@ Examples:
   kadmctl prepare-assets --apply
   kadmctl export-assets --output kadm-platform-assets.tgz
   kadmctl import-assets kadm-platform-assets.tgz
-  KADM_GITHUB_TOKEN=... kadmctl publish-release-console --tag sha-1234567 --apply
+  kadmctl publish-release-console kadm-test --tag 20260630153045 --apply
   KADM_GITHUB_TOKEN=... kadmctl configure-delivery home-prod --apply
   kadmctl configure-demo-apps home-prod --app-configs-dir /path/to/kadm-app-configs --apply
   kadmctl configure-cluster-dns home-prod --upstream 1.1.1.1 --upstream 8.8.8.8 --apply
@@ -2130,20 +2130,29 @@ apply_argocd_rollout_health_customization() {
 }
 
 default_onecd_image_tag() {
-  local onecd_dir="$1"
-  local short
-  short="$(git -C "${onecd_dir}" rev-parse --short=7 HEAD 2>/dev/null || true)"
-  if [[ -n "${short}" ]]; then
-    echo "local-${short}-$(date +%Y%m%d%H%M%S)"
-  else
-    echo "local-$(date +%Y%m%d%H%M%S)"
+  date +%Y%m%d%H%M%S
+}
+
+default_release_console_repo_dir() {
+  if [[ -f "${DEFAULT_ONECD_OVERLAY}/kustomization.yaml" ]]; then
+    printf '%s\n' "${DEFAULT_ONECD_OVERLAY%/k8s/overlays/prod}"
+    return
   fi
+  if [[ -f "${PWD}/console/k8s/overlays/prod/kustomization.yaml" ]]; then
+    printf '%s\n' "${PWD}/console"
+    return
+  fi
+  if [[ -f "${PWD}/kadm-platform-system/console/k8s/overlays/prod/kustomization.yaml" ]]; then
+    printf '%s\n' "${PWD}/kadm-platform-system/console"
+    return
+  fi
+  printf '%s\n' "${DEFAULT_ONECD_OVERLAY%/k8s/overlays/prod}"
 }
 
 git_remote_repo_slug() {
   local repo_dir="$1"
   local url path
-  url="$(git -C "${repo_dir}" config --get remote.origin.url)"
+  url="$(git_for_repo_dir "${repo_dir}" config --get remote.origin.url)"
   case "${url}" in
     git@github.com:*)
       path="${url#git@github.com:}"
@@ -2159,20 +2168,43 @@ git_remote_repo_slug() {
   printf '%s\n' "${path}"
 }
 
+git_root_for_repo_dir() {
+  local repo_dir="$1"
+  if [[ -d "${repo_dir}/../.git" ]]; then
+    (cd "${repo_dir}/.." && pwd)
+    return
+  fi
+  if [[ -d "${repo_dir}/.git" ]]; then
+    (cd "${repo_dir}" && pwd)
+    return
+  fi
+  local root
+  root="$(git -C "${repo_dir}" rev-parse --show-toplevel 2>/dev/null || true)"
+  printf '%s\n' "${root:-${repo_dir}}"
+}
+
+git_for_repo_dir() {
+  local repo_dir="$1"
+  shift
+  local git_root
+  git_root="$(git_root_for_repo_dir "${repo_dir}")"
+  git -c "safe.directory=${git_root}" -C "${repo_dir}" "$@"
+}
+
 require_clean_git_worktree() {
   local repo_dir="$1"
-  git -C "${repo_dir}" diff --quiet || die "release console repo has uncommitted changes"
-  git -C "${repo_dir}" diff --cached --quiet || die "release console repo has uncommitted changes"
-  [[ -z "$(git -C "${repo_dir}" ls-files --others --exclude-standard)" ]] || die "release console repo has uncommitted changes"
+  git_for_repo_dir "${repo_dir}" diff --quiet || die "release console repo has uncommitted changes"
+  git_for_repo_dir "${repo_dir}" diff --cached --quiet || die "release console repo has uncommitted changes"
+  [[ -z "$(git_for_repo_dir "${repo_dir}" ls-files --others --exclude-standard)" ]] || die "release console repo has uncommitted changes"
 }
 
 require_release_ref_synced() {
   local repo_dir="$1"
   local ref="$2"
   local local_head remote_head
-  git -C "${repo_dir}" fetch origin "${ref}" --quiet
-  local_head="$(git -C "${repo_dir}" rev-parse HEAD)"
-  remote_head="$(git -C "${repo_dir}" rev-parse FETCH_HEAD)"
+  git_for_repo_dir "${repo_dir}" fetch origin "${ref}" --quiet
+  local_head="$(git_for_repo_dir "${repo_dir}" rev-parse HEAD)"
+  remote_head="$(git_for_repo_dir "${repo_dir}" rev-parse FETCH_HEAD)"
   [[ "${local_head}" == "${remote_head}" ]] || die "release console repo HEAD does not match origin/${ref}; push or pull first"
 }
 
@@ -2248,17 +2280,81 @@ update_overlay_image_tag() {
   rm -f "${tmp}"
 }
 
+split_image_ref() {
+  local image_ref="$1"
+  local __repo_var="$2"
+  local __tag_var="$3"
+  [[ "${image_ref}" == *:* ]] || die "image must include a tag: ${image_ref}"
+  local repo="${image_ref%:*}"
+  local tag="${image_ref##*:}"
+  [[ -n "${repo}" && -n "${tag}" && "${repo}" != "${image_ref}" ]] || die "image must include a tag: ${image_ref}"
+  validate_image_repo "${repo}"
+  validate_image_tag "${tag}"
+  printf -v "${__repo_var}" '%s' "${repo}"
+  printf -v "${__tag_var}" '%s' "${tag}"
+}
+
+update_overlay_image() {
+  local overlay_file="$1"
+  local image_repo="$2"
+  local image_tag="$3"
+  local tmp
+  tmp="$(mktemp)"
+
+  if ! awk -v repo="${image_repo}" -v tag="${image_tag}" '
+    /^  newName:/ && !updated_name {
+      print "  newName: " repo
+      updated_name = 1
+      next
+    }
+    /^  newTag:/ && !updated_tag {
+      print "  newTag: " tag
+      updated_tag = 1
+      next
+    }
+    { print }
+    END {
+      if (!updated_name || !updated_tag) {
+        exit 42
+      }
+    }
+  ' "${overlay_file}" > "${tmp}"; then
+    rm -f "${tmp}"
+    die "failed to update image in ${overlay_file}"
+  fi
+
+  cat "${tmp}" > "${overlay_file}"
+  rm -f "${tmp}"
+}
+
+sync_argocd_application() {
+  local kubeconfig_path="$1"
+  local application="$2"
+  local revision="$3"
+  local patch
+  patch="$(printf '{"operation":{"sync":{"revision":"%s"}}}' "${revision}")"
+  kubectl_retry "${kubeconfig_path}" -n argocd patch application "${application}" --type merge -p "${patch}"
+}
+
 cmd_publish_release_console() {
   apply_kadm_env_aliases
-  local repo_dir="${DEFAULT_ONECD_OVERLAY%/k8s/overlays/prod}"
-  local image="ghcr.io/ccq18/kadm-platform-system"
+  local cluster="${DEFAULT_CLUSTER}"
+  local repo_dir
+  repo_dir="$(default_release_console_repo_dir)"
+  local default_image_repo="ghcr.io/ccq18/kadm-platform-system"
+  local image_ref=""
+  local image_repo=""
   local tag=""
   local ref="main"
-  local workflow="build-platform-system-image.yaml"
   local apply=0
+  local cluster_seen=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --image)
+        image_ref="${2:-}"
+        shift 2
+        ;;
       --repo-dir)
         repo_dir="${2:-}"
         shift 2
@@ -2276,8 +2372,7 @@ cmd_publish_release_console() {
         shift 2
         ;;
       --workflow)
-        workflow="${2:-}"
-        shift 2
+        die "--workflow is no longer used; publish an already-built image with --image or --tag"
         ;;
       --apply)
         apply=1
@@ -2291,8 +2386,16 @@ cmd_publish_release_console() {
         usage
         return 0
         ;;
-      *)
+      --*)
         die "unknown publish-release-console option: $1"
+        ;;
+      *)
+        if [[ "${cluster_seen}" -eq 1 ]]; then
+          die "unexpected publish-release-console argument: $1"
+        fi
+        cluster="$1"
+        cluster_seen=1
+        shift
         ;;
     esac
   done
@@ -2301,41 +2404,83 @@ cmd_publish_release_console() {
   local overlay_file="${repo_dir}/k8s/overlays/prod/kustomization.yaml"
   [[ -f "${overlay_file}" ]] || die "KADM release console prod overlay not found: ${overlay_file}"
 
-  tag="${tag:-$(default_onecd_image_tag "${repo_dir}")}"
-  validate_image_repo "${image}"
-  validate_image_tag "${tag}"
+  if [[ -n "${image_ref}" && -n "${tag}" ]]; then
+    die "use either --image or --tag, not both"
+  fi
+  if [[ -n "${image_ref}" ]]; then
+    split_image_ref "${image_ref}" image_repo tag
+  elif [[ -n "${tag}" ]]; then
+    image_repo="${default_image_repo}"
+    validate_image_repo "${image_repo}"
+    validate_image_tag "${tag}"
+    image_ref="${image_repo}:${tag}"
+  else
+    die "release console image is required; pass --image ${default_image_repo}:<tag> or --tag <tag>"
+  fi
+
+  validate_cluster_name "${cluster}"
   validate_git_ref "${ref}"
   local repo_slug
   repo_slug="$(git_remote_repo_slug "${repo_dir}")"
 
   if [[ "${apply}" -ne 1 ]]; then
-    info "DRY RUN: KADM release console release will not be triggered"
+    info "DRY RUN: KADM release console image will not be published"
+    info "cluster: ${cluster}"
     info "repo dir: ${repo_dir}"
     info "repo: ${repo_slug}"
-    info "image: ${image}:${tag}"
-    info "workflow: ${workflow}"
+    info "image: ${image_ref}"
     info "ref: ${ref}"
     info "updates overlay: ${overlay_file}"
+    info "commits: chore: release kadm-platform-system ${tag}"
+    info "syncs Argo CD application: kadm-platform-system"
     return 0
   fi
 
   require_command git
-  require_command gh
+  require_command kubectl
   require_clean_git_worktree "${repo_dir}"
   require_release_ref_synced "${repo_dir}" "${ref}"
+  load_profile "${cluster}"
+  [[ -f "${KUBECONFIG_PATH}" ]] || die "kubeconfig not found: ${KUBECONFIG_PATH}"
 
-  local before_file run_id
-  before_file="$(mktemp)"
-  list_workflow_run_ids "${repo_slug}" "${workflow}" "${ref}" > "${before_file}" || true
+  update_overlay_image "${overlay_file}" "${image_repo}" "${tag}"
+  if git_for_repo_dir "${repo_dir}" diff --quiet -- "${overlay_file}"; then
+    info "release console overlay already targets image: ${image_ref}"
+  else
+    git_for_repo_dir "${repo_dir}" add "${overlay_file}"
+    git_for_repo_dir "${repo_dir}" commit -m "chore: release kadm-platform-system ${tag}"
+    git_for_repo_dir "${repo_dir}" push origin "HEAD:${ref}"
+    info "updated GitOps image: ${image_ref}"
+  fi
 
-  gh_cmd workflow run "${workflow}" --repo "${repo_slug}" --ref "${ref}" -f "image_tag=${tag}" >/dev/null
-  run_id="$(wait_for_new_workflow_run_id "${repo_slug}" "${workflow}" "${ref}" "${before_file}")"
-  rm -f "${before_file}"
-  info "triggered KADM release console workflow run: ${run_id}"
-  gh_cmd run watch "${run_id}" --repo "${repo_slug}" --exit-status
-  git -C "${repo_dir}" pull --ff-only origin "${ref}"
+  local tunnel_pid
+  if is_local_ssh_target "${MASTER_SSH}" || is_local_address "${MASTER_PRIVATE_IP:-}"; then
+    info "Using local Kubernetes API access for release console publish"
+    tunnel_pid=""
+  else
+    require_command ssh
+    info "Starting temporary Kubernetes API tunnel for release console publish"
+    tunnel_pid="$(start_api_tunnel "${MASTER_SSH}" "${API_LOCAL_PORT}")"
+  fi
 
-  info "updated overlay from git: ${overlay_file}"
+  local status=0
+  set +e
+  wait_for_kube_api "${KUBECONFIG_PATH}" "${tunnel_pid}"
+  status="$?"
+  if [[ "${status}" -eq 0 ]]; then
+    sync_argocd_application "${KUBECONFIG_PATH}" kadm-platform-system "${ref}"
+    status="$?"
+  fi
+  if [[ "${status}" -eq 0 ]]; then
+    wait_for_deployment_ready "${KUBECONFIG_PATH}" kadm kadm 300
+    status="$?"
+  fi
+  set -e
+
+  stop_pid "${tunnel_pid}"
+  [[ "${status}" -eq 0 ]] || return "${status}"
+
+  info "release console published: ${image_ref}"
 }
 
 emit_onecd_secret_yaml() {
@@ -2397,6 +2542,10 @@ emit_argocd_application_yaml() {
   local path="${4:-k8s/overlays/prod}"
   local revision="${5:-main}"
   local manager_label="${6:-}"
+  local automated_sync=1
+  if [[ "${manager_label}" == "apps-registry" || "${manager_label}" == "system" ]]; then
+    automated_sync=0
+  fi
   cat <<YAML
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -2418,9 +2567,12 @@ spec:
     server: https://kubernetes.default.svc
     namespace: ${namespace}
   syncPolicy:
+$(if [[ "${automated_sync}" -eq 1 ]]; then cat <<AUTOMATED
     automated:
       prune: true
       selfHeal: true
+AUTOMATED
+fi)
     syncOptions:
       - CreateNamespace=true
 YAML

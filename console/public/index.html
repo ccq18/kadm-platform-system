@@ -40,7 +40,7 @@
         <section class="release-strip" aria-label="Release actions">
           <label class="tag-field">
             <span>镜像标签</span>
-            <input id="imageTagInput" type="text" placeholder="留空则自动生成 sha-xxxxxxx">
+            <input id="imageTagInput" type="text" placeholder="留空则自动生成 YYYYMMDDHHMMSS">
           </label>
           <button id="releaseButton" class="primary-action" type="button">发布</button>
           <button id="cancelReleaseButton" class="secondary-action subtle-action" type="button">取消发布</button>
@@ -182,7 +182,7 @@
           </div>
           <div class="toolbar-actions">
             <button id="projectRefreshButton" class="icon-button" type="button" aria-label="刷新项目" title="刷新项目">↻</button>
-            <button id="projectNewButton" class="secondary-action" type="button">新建项目</button>
+            <button id="projectSyncAllButton" class="secondary-action" type="button">应用 Git 定义</button>
           </div>
         </header>
 

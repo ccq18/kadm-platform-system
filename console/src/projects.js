@@ -27,6 +27,9 @@ export function createStaticAppRegistry(apps = []) {
     },
     async deleteApp() {
       throw unsupportedRegistryMutation();
+    },
+    async reconcileApps() {
+      throw unsupportedRegistryMutation();
     }
   };
 }
@@ -38,6 +41,9 @@ export function createStaticSourceProjectRegistry(apps = []) {
     },
     async getApp(id) {
       return findProject(apps, id);
+    },
+    async replaceApps() {
+      throw unsupportedRegistryMutation();
     }
   };
 }
@@ -76,10 +82,6 @@ export function buildRegistryApplication(app) {
         namespace: app.rollout.namespace
       },
       syncPolicy: {
-        automated: {
-          prune: true,
-          selfHeal: true
-        },
         syncOptions: ["CreateNamespace=true"]
       }
     }
@@ -124,6 +126,27 @@ export class EffectiveProjectRegistryService {
       return this.updateApp(sourceApp.id, sourceApp);
     }
     return this.createApp(sourceApp);
+  }
+
+  async reconcileApps(sourceApps) {
+    const current = await this.loadEffectiveApps();
+    const next = normalizeAppsConfig(sourceApps);
+    const nextIds = new Set(next.map((app) => app.id));
+    const stale = current.filter((app) => !nextIds.has(app.id));
+
+    await this.kubernetes.writeRegistryApps(next);
+    for (const app of next) {
+      await this.kubernetes.upsertApplication(app);
+    }
+    for (const app of stale) {
+      await this.kubernetes.deleteApplication(app.argocd.application);
+    }
+
+    return {
+      synced: next.map((app) => app.id),
+      deleted: stale.map((app) => app.id),
+      projects: next
+    };
   }
 
   async updateApp(id, patch) {
@@ -181,6 +204,12 @@ export class KubernetesSourceProjectRegistry {
 
   async getApp(id) {
     return findProject(await this.loadSourceApps(), id);
+  }
+
+  async replaceApps(apps) {
+    const next = normalizeAppsConfig(apps);
+    await this.kubernetes.writeSourceApps(next);
+    return next;
   }
 
   async loadSourceApps() {

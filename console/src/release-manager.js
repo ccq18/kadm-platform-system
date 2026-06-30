@@ -1,3 +1,5 @@
+import { resolveImageTag } from "./image-tags.js";
+
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_DEPLOY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -40,13 +42,14 @@ export class ReleaseManager {
       throw error;
     }
 
+    const resolvedImageTag = resolveImageTag(imageTag, this.now);
     const task = {
       id: `${app.id}-${Date.now()}`,
       appId: app.id,
       status: "running",
       stage: "building",
       message: "正在触发构建工作流。",
-      imageTag: imageTag || null,
+      imageTag: resolvedImageTag,
       cancelRequested: false,
       startedAt: this.timestamp(),
       updatedAt: this.timestamp(),
@@ -54,7 +57,7 @@ export class ReleaseManager {
       error: null,
       promise: null
     };
-    task.promise = this.runTask(task, app, { imageTag });
+    task.promise = this.runTask(task, app, { imageTag: resolvedImageTag });
     this.tasks.set(app.id, task);
     return snapshotTask(task);
   }

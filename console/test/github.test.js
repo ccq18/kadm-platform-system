@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildWorkflowDispatchRequest,
+  GitHubClient,
   buildGitHubContentRequest,
   buildGitHubContentUpdateRequest,
   updateKustomizeImageTag
@@ -106,4 +107,38 @@ images:
   assert.match(updated, /newTag: sidecar-old/);
   assert.match(updated, /newTag: demo-new/);
   assert.doesNotMatch(updated, /newTag: demo-old/);
+});
+
+test("GitHubClient reads the app registry from repository contents", async () => {
+  const requests = [];
+  const client = new GitHubClient({
+    token: "ghp_test",
+    async fetchImpl(url, options) {
+      requests.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            sha: "abc123",
+            content: Buffer.from(JSON.stringify([{ id: "demo-hello" }])).toString("base64")
+          });
+        }
+      };
+    }
+  });
+
+  const result = await client.readAppsRegistry({
+    owner: "ccq18",
+    repo: "kadm-app-configs",
+    ref: "main",
+    path: "apps/apps.json"
+  });
+
+  assert.equal(result.revision, "abc123");
+  assert.deepEqual(result.apps, [{ id: "demo-hello" }]);
+  assert.equal(
+    requests[0].url,
+    "https://api.github.com/repos/ccq18/kadm-app-configs/contents/apps%2Fapps.json?ref=main"
+  );
 });

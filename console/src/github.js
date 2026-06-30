@@ -177,4 +177,23 @@ export class GitHubClient {
     await sendJsonRequest(updateRequest, this.fetchImpl);
     return { updated: true, imageTag, path: `${app.gitops.path}/kustomization.yaml` };
   }
+
+  async readAppsRegistry({ owner, repo, ref = "main", path = "apps/apps.json" }) {
+    const request = buildGitHubContentRequest({
+      token: this.token,
+      owner,
+      repo,
+      path,
+      ref
+    });
+    const file = await sendJsonRequest(request, this.fetchImpl);
+    const raw = Buffer.from(String(file.content || "").replace(/\n/g, ""), "base64").toString("utf8");
+
+    return {
+      apps: JSON.parse(raw),
+      path,
+      ref,
+      revision: file.sha || null
+    };
+  }
 }

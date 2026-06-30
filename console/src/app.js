@@ -1,6 +1,8 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeAppsConfig } from "./config.js";
+import { extractImageTag } from "./image-tags.js";
 import { ReleaseManager } from "./release-manager.js";
 import { createStaticAppRegistry, createStaticSourceProjectRegistry, publicProject } from "./projects.js";
 import { deriveRolloutVersions, validateDeleteVersion, validatePromoteVersion, validateSwitchVersion } from "./versions.js";
@@ -45,6 +47,28 @@ export function createApp({ apps, appRegistry, sourceProjectRegistry, github, ar
   server.get("/api/projects/source", async (_req, res, next) => {
     try {
       res.json({ projects: (await sourceRegistry.listApps()).map(publicProject) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  server.post("/api/projects/sync", async (_req, res, next) => {
+    try {
+      const source = await loadLatestProjectRegistry({ registry, sourceRegistry, github });
+      if (source.origin === "github" && typeof sourceRegistry.replaceApps === "function") {
+        await sourceRegistry.replaceApps(source.projects);
+      }
+      const result = await registry.reconcileApps(source.projects);
+      res.json({
+        result: {
+          source: source.origin,
+          revision: source.revision,
+          warning: source.warning,
+          synced: result.synced,
+          deleted: result.deleted
+        },
+        projects: result.projects.map(publicProject)
+      });
     } catch (error) {
       next(error);
     }
@@ -124,7 +148,9 @@ export function createApp({ apps, appRegistry, sourceProjectRegistry, github, ar
         workflowRuns: settledValue(workflowRuns, []),
         diagnostics: diagnosticsValue,
         releaseTask: releases.getTask(app.id),
-        versions: rollout.status === "fulfilled" ? deriveRolloutVersions(rolloutValue, replicaSetsValue) : []
+        versions: rollout.status === "fulfilled"
+          ? attachImageTagsToVersions(app, deriveRolloutVersions(rolloutValue, replicaSetsValue), replicaSetsValue)
+          : []
       });
     } catch (error) {
       next(error);
@@ -140,7 +166,7 @@ export function createApp({ apps, appRegistry, sourceProjectRegistry, github, ar
       ]);
       res.json({
         app: publicApp(app),
-        versions: deriveRolloutVersions(rollout, replicaSets)
+        versions: attachImageTagsToVersions(app, deriveRolloutVersions(rollout, replicaSets), replicaSets)
       });
     } catch (error) {
       next(error);
@@ -169,7 +195,10 @@ export function createApp({ apps, appRegistry, sourceProjectRegistry, github, ar
         rollouts.getRollout(app),
         loadReplicaSets(rollouts, app)
       ]);
-      const version = validateSwitchVersion(deriveRolloutVersions(rollout, replicaSets), req.params.hash);
+      const version = validateSwitchVersion(
+        attachImageTagsToVersions(app, deriveRolloutVersions(rollout, replicaSets), replicaSets),
+        req.params.hash
+      );
       const result = version.role === "candidate"
         ? await rollouts.runAction(app, "promote")
         : await releaseRetainedVersionThroughGitOps({ app, version, replicaSets, github, argocd });
@@ -274,6 +303,53 @@ export function createApp({ apps, appRegistry, sourceProjectRegistry, github, ar
   return server;
 }
 
+async function loadLatestProjectRegistry({ registry, sourceRegistry, github }) {
+  const cachedProjects = await sourceRegistry.listApps();
+  const effectiveProjects = await registry.listApps();
+  const registrySource = inferRegistrySource(cachedProjects, effectiveProjects);
+
+  if (registrySource && typeof github.readAppsRegistry === "function") {
+    try {
+      const gitRegistry = await github.readAppsRegistry(registrySource);
+      return {
+        origin: "github",
+        projects: normalizeAppsConfig(gitRegistry.apps),
+        revision: gitRegistry.revision || null
+      };
+    } catch (error) {
+      if (!cachedProjects.length) {
+        throw error;
+      }
+      return {
+        origin: "source-cache",
+        projects: cachedProjects,
+        revision: null,
+        warning: error.message
+      };
+    }
+  }
+
+  return {
+    origin: "source-cache",
+    projects: cachedProjects,
+    revision: null
+  };
+}
+
+function inferRegistrySource(cachedProjects, effectiveProjects) {
+  const project = cachedProjects[0] || effectiveProjects[0] || null;
+  if (!project?.gitops?.owner || !project?.gitops?.repo) {
+    return null;
+  }
+
+  return {
+    owner: project.gitops.owner,
+    repo: project.gitops.repo,
+    ref: project.gitops.ref || "main",
+    path: "apps/apps.json"
+  };
+}
+
 function publicApp(app) {
   return {
     id: app.id,
@@ -357,7 +433,12 @@ function imageTagForVersion(app, version, replicaSets) {
     throwVersionError(`Configured image not found for version: ${version.hash}`);
   }
 
-  return imageTagFromConfiguredImage(image, app.gitops.image);
+  const tag = extractImageTag(image, app.gitops.image);
+  if (tag) {
+    return tag;
+  }
+
+  throwVersionError(`Configured image does not contain a tag: ${image}`);
 }
 
 function configuredContainerImage(replicaSet, configuredImage) {
@@ -370,19 +451,23 @@ function imageMatchesRepository(image, repository) {
   return image === repository || image?.startsWith(`${repository}:`) || image?.startsWith(`${repository}@`);
 }
 
-function imageTagFromConfiguredImage(image, repository) {
-  if (image.startsWith(`${repository}:`)) {
-    const tag = image.slice(repository.length + 1).split("@")[0];
-    if (tag) {
-      return tag;
-    }
-  }
-
-  throwVersionError(`Configured image does not contain a tag: ${image}`);
-}
-
 function throwVersionError(message) {
   const error = new Error(message);
   error.status = 409;
   throw error;
+}
+
+function attachImageTagsToVersions(app, versions, replicaSets) {
+  return versions.map((version) => ({
+    ...version,
+    imageTag: imageTagForVersionOrNull(app, version, replicaSets)
+  }));
+}
+
+function imageTagForVersionOrNull(app, version, replicaSets) {
+  try {
+    return imageTagForVersion(app, version, replicaSets);
+  } catch (_error) {
+    return null;
+  }
 }

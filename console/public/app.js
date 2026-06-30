@@ -45,6 +45,7 @@ const projectDeleteButton = document.querySelector("#projectDeleteButton");
 document.querySelector("#refreshButton").addEventListener("click", () => refreshStatus());
 document.querySelector("#clusterRefreshButton").addEventListener("click", () => refreshCluster());
 document.querySelector("#projectRefreshButton").addEventListener("click", () => refreshProjectsRegistry());
+document.querySelector("#projectSyncAllButton").addEventListener("click", () => syncAllProjects());
 document.querySelector("#releaseButton").addEventListener("click", () => runAction("release"));
 document.querySelector("#cancelReleaseButton").addEventListener("click", () => runAction("release/cancel"));
 document.querySelector("#abortButton").addEventListener("click", () => runAction("rollout/abort"));
@@ -308,6 +309,22 @@ async function syncSelectedProject() {
   }
 }
 
+async function syncAllProjects() {
+  try {
+    projectNotice.textContent = "正在应用 Git 项目定义";
+    const data = await api("/api/projects/sync", {
+      method: "POST"
+    });
+    await refreshProjectsRegistry({ silent: true, preserveSelection: true });
+    const syncedCount = data.result?.synced?.length || 0;
+    const deletedCount = data.result?.deleted?.length || 0;
+    const sourceText = data.result?.source === "github" ? "GitHub" : "缓存";
+    projectNotice.textContent = `${sourceText} 项目定义已生效：同步 ${syncedCount} 个，下线 ${deletedCount} 个`;
+  } catch (error) {
+    projectNotice.textContent = `应用 Git 定义失败：${error.message}`;
+  }
+}
+
 async function deleteSelectedProject() {
   if (!activeProjectId) {
     return;
@@ -338,12 +355,16 @@ async function runAction(action) {
 
   try {
     notice.textContent = `正在${localizeActionLabel(action)}`;
-    await api(`/api/apps/${activeAppId}/${action}`, {
+    const data = await api(`/api/apps/${activeAppId}/${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-    notice.textContent = `${localizeActionLabel(action)}请求已提交`;
+    if (action === "release" && data.releaseTask?.imageTag) {
+      notice.textContent = `发布请求已提交：${data.releaseTask.imageTag}`;
+    } else {
+      notice.textContent = `${localizeActionLabel(action)}请求已提交`;
+    }
     await refreshStatus();
   } catch (error) {
     notice.textContent = `${localizeActionLabel(action)}失败：${error.message}`;
@@ -533,10 +554,13 @@ function renderVersionInventory(versions) {
             ? `<button class="secondary-action version-delete-button" type="button" data-version-hash="${escapeHtml(version.hash)}">删除版本</button>`
             : "";
 
+          const displayVersion = version.imageTag || version.hash;
+          const tagText = version.imageTag ? `Tag ${version.imageTag}` : "Tag 未知";
+
           return `<article class="version-row">
     <div>
-      <strong>${escapeHtml(version.hash)}</strong>
-      <small>${escapeHtml(roleText)} / ${escapeHtml(trafficText)} / ${escapeHtml(version.replicas.ready)}/${escapeHtml(version.replicas.total)} Ready / 创建于 ${escapeHtml(formatTimestamp(version.createdAt))}</small>
+      <strong>${escapeHtml(displayVersion)}</strong>
+      <small>${escapeHtml(tagText)} / Hash ${escapeHtml(version.hash)} / ${escapeHtml(roleText)} / ${escapeHtml(trafficText)} / ${escapeHtml(version.replicas.ready)}/${escapeHtml(version.replicas.total)} Ready / 创建于 ${escapeHtml(formatTimestamp(version.createdAt))}</small>
     </div>
     <div class="version-actions">
       ${switchButton}

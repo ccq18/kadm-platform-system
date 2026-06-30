@@ -231,6 +231,7 @@ test("switch route releases a retained version through GitOps instead of patchin
     });
 
     assert.equal(data.version.hash, "old-hash");
+    assert.equal(data.version.imageTag, "sha-old");
     assert.equal(data.result.imageTag, "sha-old");
     assert.deepEqual(calls, [
       { type: "gitops", appId: "demo-hello", imageTag: "sha-old" },
@@ -505,6 +506,157 @@ test("projects sync route imports a Git-defined project into the effective regis
 
     assert.equal(data.project.id, "demo-hello-spring");
     assert.deepEqual(calls, ["demo-hello-spring"]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("projects sync route reconciles latest GitHub app registry into the effective registry", async () => {
+  const calls = [];
+  const server = await listen({
+    sourceProjectRegistry: {
+      async listApps() {
+        return [appConfig];
+      },
+      async replaceApps(projects) {
+        calls.push({ type: "replaceSource", ids: projects.map((project) => project.id) });
+        return projects;
+      }
+    },
+    appRegistry: {
+      async listApps() {
+        return [appConfig];
+      },
+      async reconcileApps(projects) {
+        calls.push({ type: "reconcile", ids: projects.map((project) => project.id) });
+        return {
+          synced: projects.map((project) => project.id),
+          deleted: ["demo-hello-copy"],
+          projects
+        };
+      }
+    },
+    github: {
+      async readAppsRegistry(source) {
+        calls.push({ type: "readGitHub", source });
+        return {
+          apps: [appConfig, secondAppConfig],
+          revision: "abc123"
+        };
+      },
+      async listWorkflowRuns() {
+        return [];
+      }
+    }
+  });
+
+  try {
+    const data = await request(server, "/api/projects/sync", {
+      method: "POST"
+    });
+
+    assert.equal(data.result.source, "github");
+    assert.equal(data.result.revision, "abc123");
+    assert.deepEqual(data.result.synced, ["demo-hello", "demo-hello-spring"]);
+    assert.deepEqual(data.result.deleted, ["demo-hello-copy"]);
+    assert.deepEqual(data.projects.map((project) => project.id), ["demo-hello", "demo-hello-spring"]);
+    assert.deepEqual(calls, [
+      {
+        type: "readGitHub",
+        source: {
+          owner: "ccq18",
+          repo: "kadm-app-configs",
+          ref: "main",
+          path: "apps/apps.json"
+        }
+      },
+      { type: "replaceSource", ids: ["demo-hello", "demo-hello-spring"] },
+      { type: "reconcile", ids: ["demo-hello", "demo-hello-spring"] }
+    ]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("projects sync route falls back to the source cache when GitHub registry loading fails", async () => {
+  const calls = [];
+  const server = await listen({
+    sourceProjectRegistry: {
+      async listApps() {
+        return [appConfig, secondAppConfig];
+      }
+    },
+    appRegistry: {
+      async listApps() {
+        return [appConfig];
+      },
+      async reconcileApps(projects) {
+        calls.push(projects.map((project) => project.id));
+        return {
+          synced: projects.map((project) => project.id),
+          deleted: [],
+          projects
+        };
+      }
+    },
+    github: {
+      async readAppsRegistry() {
+        throw new Error("GitHub unavailable");
+      },
+      async listWorkflowRuns() {
+        return [];
+      }
+    }
+  });
+
+  try {
+    const data = await request(server, "/api/projects/sync", {
+      method: "POST"
+    });
+
+    assert.equal(data.result.source, "source-cache");
+    assert.match(data.result.warning, /GitHub unavailable/);
+    assert.deepEqual(calls, [["demo-hello", "demo-hello-spring"]]);
+  } finally {
+    await close(server);
+  }
+});
+
+test("versions route includes image tags from retained ReplicaSets", async () => {
+  const server = await listen({
+    rollouts: {
+      async getRollout() {
+        return { status: { phase: "Healthy", stableRS: "new-hash", currentPodHash: "new-hash" } };
+      },
+      async getReplicaSets() {
+        return [
+          {
+            metadata: {
+              name: "hello-new-hash",
+              creationTimestamp: "2026-06-28T00:00:00Z",
+              labels: { "rollouts-pod-template-hash": "new-hash" }
+            },
+            spec: { replicas: 2, template: { spec: { containers: [{ image: "ghcr.io/ccq18/demo-hello:20260628000000" }] } } },
+            status: { replicas: 2, readyReplicas: 2 }
+          },
+          {
+            metadata: {
+              name: "hello-old-hash",
+              creationTimestamp: "2026-06-27T00:00:00Z",
+              labels: { "rollouts-pod-template-hash": "old-hash" }
+            },
+            spec: { replicas: 0, template: { spec: { containers: [{ image: "ghcr.io/ccq18/demo-hello:20260627000000" }] } } },
+            status: { replicas: 0, readyReplicas: 0 }
+          }
+        ];
+      }
+    }
+  });
+
+  try {
+    const data = await request(server, "/api/apps/demo-hello/versions");
+
+    assert.deepEqual(data.versions.map((version) => version.imageTag), ["20260628000000", "20260627000000"]);
   } finally {
     await close(server);
   }
