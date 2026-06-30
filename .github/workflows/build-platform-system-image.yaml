@@ -12,6 +12,7 @@ on:
       - main
     paths:
       - console/**
+      - '!console/k8s/**'
       - .github/workflows/build-platform-system-image.yaml
 
 permissions:
