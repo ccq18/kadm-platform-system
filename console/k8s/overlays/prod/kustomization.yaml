@@ -5,4 +5,4 @@ resources:
 images:
 - name: ghcr.io/ccq18/kadm-platform-system
   newName: ghcr.io/ccq18/kadm-platform-system
-  newTag: sha-051d28b
+  newTag: 20260630060828
