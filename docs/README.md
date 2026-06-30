@@ -8,6 +8,7 @@
 | --- | --- |
 | `安装.md` | 当前安装、客户端初始化和控制台访问流程 |
 | `kadm-release-system.md` | 当前 KADM 发布链路和仓库职责 |
+| `git-change-activation.md` | Git 改动、项目定义、发布和自动生效边界 |
 | `../README.md` | 平台安装、`kadmctl`、Release Console 和 Day-2 说明 |
 | `../console/README.md` | Release Console 开发、部署和 API |
 | `../../kadm-platform-assets/README.md` | 离线包内容、Release 和 CI |
@@ -40,6 +41,7 @@ The official documentation in this repository now covers only the active KADM pa
 | --- | --- |
 | `安装.md` | Current install, client setup, and console access flow |
 | `kadm-release-system.md` | Current KADM release flow and repository responsibilities |
+| `git-change-activation.md` | Git change activation rules for project definitions, releases, and automatic effects |
 | `../README.md` | Platform install, `kadmctl`, Release Console, and Day-2 notes |
 | `../console/README.md` | Release Console development, deployment, and API |
 | `../../kadm-platform-assets/README.md` | Offline bundle contents, Release URLs, and CI |
