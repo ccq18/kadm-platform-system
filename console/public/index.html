@@ -177,7 +177,7 @@
       <section id="projectWorkspace" class="workspace" hidden>
         <header class="topbar">
           <div>
-            <p class="eyebrow">projects / effective registry</p>
+            <p class="eyebrow">projects / registry</p>
             <h2>项目管理</h2>
           </div>
           <div class="toolbar-actions">
@@ -187,40 +187,47 @@
         </header>
 
         <section class="project-layout" aria-label="Project management">
-          <article class="panel project-list-panel">
+          <article class="panel">
             <div class="panel-heading">
-              <h3>有效项目</h3>
+              <h3>项目列表</h3>
               <span id="projectCount" class="panel-badge">0</span>
             </div>
             <div id="projectList" class="project-list"></div>
           </article>
 
-          <section class="panel project-form">
-            <div class="panel-heading">
-              <div>
-                <h3>Git 定义缓存</h3>
-                <p class="panel-copy">这里显示的是 CI 推送到系统的 Git 定义缓存，不是实时拉 Git。</p>
-              </div>
+          <div class="project-detail-panel">
+            <div id="projectDetailEmpty" class="panel project-detail-empty">
+              <p class="empty-state">选择一个项目查看详情</p>
             </div>
 
-            <div class="panel-heading">
-              <h3>可导入项目</h3>
-              <span id="sourceProjectCount" class="panel-badge">0</span>
-            </div>
-            <div id="sourceProjectList" class="project-list"></div>
-
-            <div class="panel-heading">
-              <div>
-                <h3 id="selectedProjectTitle">当前选择</h3>
-                <p class="panel-copy">导入/同步只修改系统生效层；下线只影响系统，不回写 Git。</p>
+            <div id="projectDetailContent" class="panel project-detail-content" hidden>
+              <div class="project-detail-header">
+                <div class="project-detail-meta">
+                  <h3 id="selectedProjectTitle">项目</h3>
+                  <span id="projectStatusBadge" class="project-status-badge"></span>
+                </div>
+                <div class="project-detail-actions">
+                  <button id="projectSyncButton" class="primary-action" type="button">导入/同步</button>
+                  <button id="projectDeleteButton" class="danger-action" type="button">下线</button>
+                </div>
+              </div>
+              <p class="project-detail-note">导入/同步只修改系统生效层；下线只影响系统，不回写 Git。</p>
+              <div class="project-info-grid">
+                <section class="project-info-section">
+                  <h4>源码</h4>
+                  <dl id="projectSourceDetails"></dl>
+                </section>
+                <section class="project-info-section">
+                  <h4>GitOps</h4>
+                  <dl id="projectGitopsDetails"></dl>
+                </section>
+                <section class="project-info-section">
+                  <h4>运行时</h4>
+                  <dl id="projectRuntimeDetails"></dl>
+                </section>
               </div>
             </div>
-            <dl id="projectDetails"></dl>
-            <div class="project-form-actions">
-              <button id="projectSyncButton" class="primary-action" type="button">导入/同步到系统</button>
-              <button id="projectDeleteButton" class="danger-action" type="button">从系统下线</button>
-            </div>
-          </section>
+          </div>
         </section>
 
         <p id="projectNotice" class="notice" role="status"></p>

@@ -549,25 +549,141 @@ input:disabled {
   background: #eef6ff;
 }
 
-.project-row strong,
 .project-row small {
   display: block;
-}
-
-.project-row small {
-  margin-top: 6px;
+  margin-top: 4px;
   color: var(--muted);
 }
 
-.project-form {
-  display: grid;
-  gap: 14px;
+.project-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.project-form-actions {
+.project-row-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: #f8fafb;
+}
+
+.project-row-badge[data-state="both"] {
+  border-color: #b7dec8;
+  color: var(--ok);
+  background: #eef9f1;
+}
+
+.project-row-badge[data-state="source"] {
+  border-color: #8bb7e5;
+  color: var(--accent);
+  background: #eef6ff;
+}
+
+.project-detail-panel {
   display: flex;
+  flex-direction: column;
+}
+
+.project-detail-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+}
+
+.project-detail-content {
+  display: grid;
+  gap: 16px;
+}
+
+.project-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-detail-meta {
+  display: flex;
+  align-items: center;
   gap: 10px;
-  justify-content: flex-start;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.project-detail-meta h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.project-status-badge {
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: #f8fafb;
+}
+
+.project-status-badge[data-state="both"] {
+  border-color: #b7dec8;
+  color: var(--ok);
+  background: #eef9f1;
+}
+
+.project-status-badge[data-state="source"] {
+  border-color: #8bb7e5;
+  color: var(--accent);
+  background: #eef6ff;
+}
+
+.project-status-badge[data-state="effective"] {
+  border-color: #e6d39a;
+  color: var(--warn);
+  background: #fff9e8;
+}
+
+.project-detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.project-detail-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-info-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.project-info-section {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #f8fafb;
+}
+
+.project-info-section h4 {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.project-info-section dl {
+  grid-template-columns: 72px minmax(0, 1fr);
+  font-size: 13px;
 }
 
 .version-inventory {
@@ -742,6 +858,7 @@ pre {
   .metrics-grid,
   .details-grid,
   .project-layout,
+  .project-info-grid,
   .cluster-summary,
   .node-layout,
   .node-row {

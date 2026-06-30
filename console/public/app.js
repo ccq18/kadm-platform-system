@@ -34,11 +34,8 @@ const masterRoleButton = document.querySelector("#masterRoleButton");
 const joinScript = document.querySelector("#joinScript");
 const copyJoinButton = document.querySelector("#copyJoinButton");
 const projectList = document.querySelector("#projectList");
-const sourceProjectList = document.querySelector("#sourceProjectList");
 const projectCount = document.querySelector("#projectCount");
-const sourceProjectCount = document.querySelector("#sourceProjectCount");
 const selectedProjectTitle = document.querySelector("#selectedProjectTitle");
-const projectDetails = document.querySelector("#projectDetails");
 const projectSyncButton = document.querySelector("#projectSyncButton");
 const projectDeleteButton = document.querySelector("#projectDeleteButton");
 
@@ -194,16 +191,16 @@ async function refreshProjectsRegistry({ silent = false, preserveSelection = tru
     sourceProjects = sourceData.projects || [];
     apps = effectiveProjects.map(projectToApp);
 
-    if (!preserveSelection || !sourceProjects.some((project) => project.id === activeProjectId)) {
-      activeProjectId = sourceProjects[0]?.id || null;
+    const allProjectIds = new Set([...sourceProjects.map((p) => p.id), ...effectiveProjects.map((p) => p.id)]);
+    if (!preserveSelection || !allProjectIds.has(activeProjectId)) {
+      activeProjectId = sourceProjects[0]?.id || effectiveProjects[0]?.id || null;
     }
     if (!apps.some((app) => app.id === activeAppId)) {
       activeAppId = apps[0]?.id || null;
     }
 
     renderAppList();
-    renderEffectiveProjectList();
-    renderSourceProjectList();
+    renderProjectList();
     renderProjectDetails();
 
     if (!silent) {
@@ -214,49 +211,40 @@ async function refreshProjectsRegistry({ silent = false, preserveSelection = tru
   }
 }
 
-function renderEffectiveProjectList() {
-  projectCount.textContent = String(effectiveProjects.length);
-  projectList.innerHTML = effectiveProjects.length
-    ? effectiveProjects
-        .map(
-          (project) => `<button class="project-row" type="button" data-effective-project-id="${escapeHtml(project.id)}" aria-current="${project.id === activeProjectId ? "true" : "false"}">
-    <strong>${escapeHtml(project.name)}</strong>
-    <small>已生效 / ${escapeHtml(project.id)} / ${escapeHtml(project.argocd.application)}</small>
-  </button>`
-        )
-        .join("")
-    : `<p class="empty-state">当前没有生效中的项目。</p>`;
+function renderProjectList() {
+  const effectiveIds = new Set(effectiveProjects.map((p) => p.id));
+  const sourceIds = new Set(sourceProjects.map((p) => p.id));
 
-  for (const button of projectList.querySelectorAll("[data-effective-project-id]")) {
-    button.addEventListener("click", () => {
-      activeProjectId = button.getAttribute("data-effective-project-id");
-      renderEffectiveProjectList();
-      renderSourceProjectList();
-      renderProjectDetails();
-    });
+  const seen = new Set();
+  const allProjects = [];
+  for (const p of sourceProjects) {
+    if (!seen.has(p.id)) { seen.add(p.id); allProjects.push(p); }
   }
-}
+  for (const p of effectiveProjects) {
+    if (!seen.has(p.id)) { seen.add(p.id); allProjects.push(p); }
+  }
 
-function renderSourceProjectList() {
-  const effectiveIds = new Set(effectiveProjects.map((project) => project.id));
-  sourceProjectCount.textContent = String(sourceProjects.length);
-  sourceProjectList.innerHTML = sourceProjects.length
-    ? sourceProjects
-        .map((project) => {
-          const isEffective = effectiveIds.has(project.id);
-          return `<button class="project-row" type="button" data-source-project-id="${escapeHtml(project.id)}" aria-current="${project.id === activeProjectId ? "true" : "false"}">
+  projectCount.textContent = String(allProjects.length);
+  projectList.innerHTML = allProjects.length
+    ? allProjects.map((project) => {
+        const isEffective = effectiveIds.has(project.id);
+        const isSource = sourceIds.has(project.id);
+        const badgeText = isEffective && isSource ? "Git + 生效" : isSource ? "仅 Git" : "仅生效";
+        const badgeState = isEffective && isSource ? "both" : isSource ? "source" : "effective";
+        return `<button class="project-row" type="button" data-project-id="${escapeHtml(project.id)}" aria-current="${project.id === activeProjectId ? "true" : "false"}">
+  <div class="project-row-header">
     <strong>${escapeHtml(project.name)}</strong>
-    <small>${isEffective ? "Git 已定义 / 系统已生效" : "Git 已定义 / 尚未生效"}</small>
-  </button>`;
-        })
-        .join("")
-    : `<p class="empty-state">Git 中暂无项目定义。</p>`;
+    <span class="project-row-badge" data-state="${badgeState}">${escapeHtml(badgeText)}</span>
+  </div>
+  <small>${escapeHtml(project.id)}</small>
+</button>`;
+      }).join("")
+    : `<p class="empty-state">暂无项目数据。</p>`;
 
-  for (const button of sourceProjectList.querySelectorAll("[data-source-project-id]")) {
+  for (const button of projectList.querySelectorAll("[data-project-id]")) {
     button.addEventListener("click", () => {
-      activeProjectId = button.getAttribute("data-source-project-id");
-      renderEffectiveProjectList();
-      renderSourceProjectList();
+      activeProjectId = button.getAttribute("data-project-id");
+      renderProjectList();
       renderProjectDetails();
     });
   }
@@ -267,25 +255,49 @@ function renderProjectDetails() {
   const effectiveProject = effectiveProjects.find((project) => project.id === activeProjectId) || null;
   const project = sourceProject || effectiveProject;
 
+  const emptyEl = document.querySelector("#projectDetailEmpty");
+  const contentEl = document.querySelector("#projectDetailContent");
+  const badge = document.querySelector("#projectStatusBadge");
+
   if (!project) {
-    selectedProjectTitle.textContent = "当前选择";
-    projectDetails.innerHTML = `<dt>状态</dt><dd>未选择项目</dd>`;
+    emptyEl.hidden = false;
+    contentEl.hidden = true;
     projectSyncButton.disabled = true;
     projectDeleteButton.disabled = true;
     return;
   }
 
-  selectedProjectTitle.textContent = `${project.name} / ${project.id}`;
-  projectDetails.innerHTML = detailRows({
-    生效状态: effectiveProject ? "已在系统生效" : "仅在 Git 定义",
-    源码仓库: `${project.github.owner}/${project.github.repo}`,
+  emptyEl.hidden = true;
+  contentEl.hidden = false;
+
+  selectedProjectTitle.textContent = project.name;
+
+  if (sourceProject && effectiveProject) {
+    badge.textContent = "Git + 已生效";
+    badge.dataset.state = "both";
+  } else if (sourceProject) {
+    badge.textContent = "仅 Git 定义";
+    badge.dataset.state = "source";
+  } else {
+    badge.textContent = "仅系统生效";
+    badge.dataset.state = "effective";
+  }
+
+  document.querySelector("#projectSourceDetails").innerHTML = detailRows({
+    仓库: `${project.github.owner}/${project.github.repo}`,
     Workflow: project.github.workflow,
-    源码分支: project.github.ref,
-    GitOps_仓库: `${project.gitops.owner}/${project.gitops.repo}`,
-    GitOps_路径: project.gitops.path,
-    镜像: project.gitops.image,
-    GitOps_分支: project.gitops.ref,
-    Argo_Application: project.argocd.application,
+    分支: project.github.ref
+  });
+
+  document.querySelector("#projectGitopsDetails").innerHTML = detailRows({
+    仓库: `${project.gitops.owner}/${project.gitops.repo}`,
+    路径: project.gitops.path,
+    分支: project.gitops.ref,
+    镜像: project.gitops.image
+  });
+
+  document.querySelector("#projectRuntimeDetails").innerHTML = detailRows({
+    ArgoCD: project.argocd.application,
     Rollout: `${project.rollout.namespace}/${project.rollout.name}`
   });
 
